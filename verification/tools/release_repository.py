@@ -23,7 +23,7 @@ def release_repository(component,output):
     for name in ('server','client','shared','tests','tools','docs'):
         for source in (ROOT/name).rglob('*'):
             if (source.is_file() and '__pycache__' not in source.parts and
-                    source.suffix in ('.py','.json','.html','.js','.css','.yml','.yaml','.md','.sh')):
+                    source.suffix in ('.py','.json','.html','.js','.cjs','.css','.yml','.yaml','.md','.sh')):
                 destination=verification/source.relative_to(ROOT)
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copyfile(source,destination)

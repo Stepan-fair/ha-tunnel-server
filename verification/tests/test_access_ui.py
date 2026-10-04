@@ -8,7 +8,7 @@ def test_server_controls_labels_and_safe_rendering():
         assert label in js+html
     assert 'innerHTML' not in js
     for unit in ('years','months','weeks','days','hours','minutes'): assert unit in js
-    assert 'revision' in js and 'randomUUID' in js
+    assert 'revision' in js and 'commandId()' in js
     assert '18080' not in html and 'Dunaiskiy' not in html
 
 

@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const root=process.argv[2]||path.resolve(__dirname,'../server/app/templates');
+const app=fs.readFileSync(path.join(root,'app.js'),'utf8');
+const expression=app.match(/command_id:([^,]+)/)[1];
+const helper=path.join(root,'command_id.js');
+let calls=0;
+const context=vm.createContext({crypto:{getRandomValues(bytes){calls++;for(let i=0;i<bytes.length;i++)bytes[i]=(i+calls)&255;return bytes;}},Uint8Array,Math:{random(){throw Error('Insecure randomness must never be used');}}});
+if(fs.existsSync(helper))vm.runInContext(fs.readFileSync(helper,'utf8'),context);
+const first=vm.runInContext(expression,context),second=vm.runInContext(expression,context);
+assert.match(first,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+assert.notEqual(first,second);assert.equal(calls,2);
+assert.equal(first,'01020304-0506-4708-890a-0b0c0d0e0f10');
+const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
+const helperIndex=html.indexOf('<script src="command_id.js" defer></script>'),appIndex=html.indexOf('<script src="app.js" defer></script>');
+assert.ok(helperIndex>=0 && appIndex>=0,'Both script tags must be present');
+assert.ok(helperIndex<appIndex,'Command helper must load before the application');
+console.log('PASS: actual access command works without randomUUID; CSPRNG UUID version/variant and fresh bytes verified');
