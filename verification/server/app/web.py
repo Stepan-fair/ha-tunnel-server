@@ -312,7 +312,7 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
     async def help_page(request): return web.json_response({'text':documentation(__file__)})
     async def asset(request):
         name=request.match_info['name']
-        if name not in ('app.js','style.css'):
+        if name not in ('app.js','command_id.js','style.css'):
             raise web.HTTPNotFound()
         kind='text/javascript' if name.endswith('.js') else 'text/css'
         return web.Response(body=(Path(__file__).parent/'templates'/name).read_bytes(),content_type=kind)
