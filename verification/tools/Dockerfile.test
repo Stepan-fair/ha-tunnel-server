@@ -1,0 +1,16 @@
+FROM python:3.13-slim-bookworm@sha256:5024f48ba9441d4b13a95d3945abc6365538e3a31109833367a1923523c6efed
+WORKDIR /workspace
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends nginx mosquitto && rm -rf /var/lib/apt/lists/*
+COPY requirements-dev.lock ./
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements-dev.lock
+COPY tools/fetch_frp.py tools/frp_versions.json ./tools/
+RUN python tools/fetch_frp.py frps && python tools/fetch_frp.py frpc
+COPY server ./server
+COPY client ./client
+COPY shared ./shared
+COPY tests ./tests
+COPY pytest.ini ./
+COPY tools ./tools
+COPY requirements.lock repository.yaml README.md LICENSE SECURITY.md THIRD_PARTY.md ./
+COPY docs ./docs
+CMD ["python", "-m", "pytest", "-q", "--tb=short"]

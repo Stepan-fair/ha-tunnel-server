@@ -1,0 +1,23 @@
+name: HA Tunnel Client
+version: "0.3.2"
+slug: ha_tunnel_client
+description: Доступ к Home Assistant за CGNAT по одному коду подключения
+arch: [amd64]
+image: ghcr.io/stepan-fair/ha-tunnel-client-{arch}
+startup: application
+boot: auto
+init: false
+host_network: true
+ingress: true
+ingress_port: 18991
+panel_admin: true
+panel_icon: mdi:home-lock
+services: [mqtt:want]
+hassio_api: true
+homeassistant_api: true
+hassio_role: homeassistant
+map:
+  - type: homeassistant_config
+    read_only: false
+options: {}
+schema: {}
