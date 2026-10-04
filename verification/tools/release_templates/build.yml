@@ -1,0 +1,94 @@
+name: Versioned HA application image
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  security-tests:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require production context to match tested sources
+        run: python verification/tools/verify_release_context.py --repository . --component __ROLE__
+      - name: Build isolated Linux verification image
+        run: docker build -t ha-tunnel-verification -f verification/tools/Dockerfile.test verification
+      - name: Require real FRP Nginx and MQTT tests with no skips
+        run: docker run --rm --network none --memory 768m --cpus 2 --pids-limit 256 ha-tunnel-verification python tools/security_ci.py
+      - name: Build production image for vulnerability inspection
+        run: docker build -t ha-tunnel-scan ./__ROLE__
+      - name: Inspect complete production image without daemon access
+        run: |
+          set -o pipefail
+          docker save ha-tunnel-scan | docker run --rm -i --memory 768m --cpus 2 --pids-limit 128 --cap-drop ALL --security-opt no-new-privileges -e GRYPE_DB_CACHE_DIR=/tmp/grype-db --entrypoint /busybox/sh ghcr.io/anchore/grype@sha256:a640dcef403cda894efcba631ceb45ea324060771ce89d736598895ae1d18418 -c '/busybox/cat > /tmp/image.tar; /grype docker-archive:/tmp/image.tar -o json' > image-scan.json
+      - name: Reject fixable severe vulnerabilities
+        run: python verification/tools/check_image_scan.py image-scan.json
+      - name: Preserve complete vulnerability report including unfixed findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: __ROLE__-image-vulnerabilities
+          path: image-scan.json
+          if-no-files-found: warn
+  build:
+    needs: security-tests
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate immutable release version
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os,re,pathlib
+          config=pathlib.Path('__ROLE__/config.yaml').read_text()
+          version=re.search(r'^version: "([0-9]+\.[0-9]+\.[0-9]+)"$',config,re.M).group(1)
+          assert os.environ['RELEASE_TAG']=='v'+version
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('version='+version+'\n')
+          PY
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse replacement of a published image
+        env:
+          IMAGE: ghcr.io/stepan-fair/ha-tunnel-__ROLE__-${{ matrix.arch }}
+          VERSION: ${{ steps.release.outputs.version }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/guard_image.py
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: ./__ROLE__
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ghcr.io/stepan-fair/ha-tunnel-__ROLE__-${{ matrix.arch }}:${{ steps.release.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Stepan-fair/ha-tunnel-__ROLE__
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
