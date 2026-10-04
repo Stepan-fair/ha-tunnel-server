@@ -1,0 +1,21 @@
+configuration:
+  bandwidth_limit_mb:
+    name: Лимит каждого клиента, МБ/с
+    description: Серверный предел от 1 до 1000 МБ/с. Клиент не может его повысить.
+  base_domain:
+    name: Основной домен
+    description: Ваш основной домен для адресов клиентов. При первой установке откройте веб-интерфейс и пройдите настройку.
+  server_url:
+    name: Адрес регистрации
+    description: HTTPS-адрес Server, например https://tunnel.example.org.
+  npm_host:
+    name: Внутреннее имя Nginx Proxy Manager
+    description: Имя контейнера NPM в сети приложений Home Assistant.
+  admin_user_ids:
+    name: Администраторы панели
+    description: ID пользователей HA с доступом к панели. Пока список пуст, мастер доступен только подтверждённому администратору HA; туннель не запускается.
+  reserved_names:
+    name: Занятые имена
+    description: Имена существующих поддоменов, которые нельзя выдавать клиентам.
+network:
+  7000/tcp: Защищённое подключение клиентов FRP
