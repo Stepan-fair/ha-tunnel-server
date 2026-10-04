@@ -90,12 +90,21 @@ class SetupService:
         try:
             info=await self.supervisor.get('/supervisor/info')
             self.detected.update({k:info[k] for k in ('timezone','arch') if k in info})
-            apps=await self.supervisor.get('/addons')
-            for app in apps.get('addons',[]):
-                if 'nginxproxymanager' in app.get('slug',''):
-                    npm=await self.supervisor.get('/addons/'+app['slug']+'/info')
-                    self.detected['npm_host']=npm['hostname']; break
         except Exception: self.detected['discovery']='unknown'
+        # The default Supervisor role permits info for a known app but not listing apps.
+        # This is the public Community Apps identifier, never an owner's installation data.
+        candidates=['a0d7b954_nginxproxymanager']
+        try:
+            apps=await self.supervisor.get('/addons')
+            candidates=[app['slug'] for app in apps.get('addons',[]) if 'nginxproxymanager' in app.get('slug','')]+candidates
+        except Exception: pass
+        for candidate in dict.fromkeys(candidates):
+            try:
+                npm=await self.supervisor.get('/addons/'+candidate+'/info')
+                if npm.get('hostname'):
+                    self.detected['npm_host']=npm['hostname']; break
+            except Exception: continue
+        if 'npm_host' not in self.detected: self.detected['discovery']='unknown'
         return self.snapshot()
 
     async def save(self,draft,expected_revision):
