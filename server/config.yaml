@@ -3,6 +3,7 @@ version: "0.3.0"
 slug: ha_tunnel_server
 description: Собственный сервер защищённого удалённого доступа к Home Assistant
 arch: [amd64]
+image: ghcr.io/stepan-fair/ha-tunnel-server-{arch}
 startup: services
 boot: auto
 init: false
