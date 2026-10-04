@@ -41,7 +41,7 @@ def package(output,*,component=None):
                 copy(source,target/component/'app'/source.relative_to(ROOT/component/'app'))
         for source in (ROOT/'shared').glob('*.py'):
             copy(source,target/'shared'/source.name)
-        for name in ('fetch_frp.py','frp_versions.json','healthcheck.py'):
+        for name in ('fetch_frp.py','frp_versions.json','healthcheck.py','build_frp.sh'):
             copy(ROOT/'tools'/name,target/'tools'/name)
         copy(ROOT/'requirements.lock',target/'requirements.lock')
 

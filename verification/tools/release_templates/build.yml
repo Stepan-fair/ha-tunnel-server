@@ -26,6 +26,21 @@ jobs:
         run: docker build -t ha-tunnel-verification -f verification/tools/Dockerfile.test verification
       - name: Require real FRP Nginx and MQTT tests with no skips
         run: docker run --rm --network none --memory 768m --cpus 2 --pids-limit 256 ha-tunnel-verification python tools/security_ci.py
+      - name: Build production image for vulnerability inspection
+        run: docker build -t ha-tunnel-scan ./__ROLE__
+      - name: Inspect complete production image without daemon access
+        run: |
+          set -o pipefail
+          docker save ha-tunnel-scan | docker run --rm -i --memory 768m --cpus 2 --pids-limit 128 --cap-drop ALL --security-opt no-new-privileges -e GRYPE_DB_CACHE_DIR=/tmp/grype-db --entrypoint /busybox/sh ghcr.io/anchore/grype@sha256:a640dcef403cda894efcba631ceb45ea324060771ce89d736598895ae1d18418 -c '/busybox/cat > /tmp/image.tar; /grype docker-archive:/tmp/image.tar -o json' > image-scan.json
+      - name: Reject fixable severe vulnerabilities
+        run: python verification/tools/check_image_scan.py image-scan.json
+      - name: Preserve complete vulnerability report including unfixed findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: __ROLE__-image-vulnerabilities
+          path: image-scan.json
+          if-no-files-found: warn
   build:
     needs: security-tests
     if: startsWith(github.ref, 'refs/tags/v')
