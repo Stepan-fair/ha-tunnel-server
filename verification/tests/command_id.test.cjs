@@ -11,5 +11,7 @@ assert.match(first,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 assert.notEqual(first,second);assert.equal(calls,2);
 assert.equal(first,'01020304-0506-4708-890a-0b0c0d0e0f10');
 const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
-assert.ok(html.indexOf('command_id.js')<html.indexOf('app.js'));
+const helperIndex=html.indexOf('<script src="command_id.js" defer></script>'),appIndex=html.indexOf('<script src="app.js" defer></script>');
+assert.ok(helperIndex>=0 && appIndex>=0,'Both script tags must be present');
+assert.ok(helperIndex<appIndex,'Command helper must load before the application');
 console.log('PASS: actual access command works without randomUUID; CSPRNG UUID version/variant and fresh bytes verified');
