@@ -3,7 +3,7 @@ from pathlib import Path
 import secrets
 from aiohttp import web
 from shared.http import safe_errors,ingress_middleware,csrf_for
-from shared.presentation import format_metrics
+from shared.presentation import format_metrics,format_billing
 from shared.help import documentation
 
 
@@ -13,6 +13,7 @@ def make_app(controller,options,admin_check=None):
     app=web.Application(client_max_size=8192,middlewares=[safe_errors,ingress_middleware(options,key,admin_check)])
     async def state(request):
         result=controller.status()
+        result['billing_presentation']=format_billing((result.get('access') or {}).get('billing'),stale=result.get('billing_stale',True))
         result['presentation']=format_metrics(result.get('telemetry'),result.get('access'),
             options.get('timezone',(result.get('access') or {}).get('timezone','UTC')))
         return web.json_response({**result,'csrf':csrf_for(key,request.headers['X-Remote-User-Id'])})

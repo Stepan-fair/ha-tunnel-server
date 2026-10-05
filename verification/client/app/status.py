@@ -3,6 +3,7 @@ import json
 from aiohttp import ClientSession, ClientTimeout, encode_basic_auth
 from shared.validation import origin
 from shared.telemetry import parse_telemetry
+from shared.billing_status import validate_billing
 
 
 def validate_status(data, client_id):
@@ -12,6 +13,7 @@ def validate_status(data, client_id):
         if type(data.get(name)) is not int or data[name]<0: raise ValueError('Invalid access revision')
     if any(name in data for name in ('secret','secret_hash','status_secret_hash','code','code_hash','code_ciphertext','invitation')):
         raise ValueError('Unexpected private fields')
+    if 'billing' in data: validate_billing(data['billing'])
     if 'telemetry' in data: parse_telemetry(data['telemetry'],0)
     return data
 

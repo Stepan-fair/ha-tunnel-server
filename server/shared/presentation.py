@@ -45,5 +45,38 @@ def format_metrics(telemetry,access,timezone):
         'send_rate':size(t.get('from_client_bps'),True) if fresh else 'Нет свежих данных',
         'received':size(t.get('to_client_bytes')),'sent':size(t.get('from_client_bytes')),
         'total':size(t.get('total_bytes')),'updated':updated,
-        'access':'Нет данных' if access is None else 'бессрочный' if access.get('deadline') is None else 'до '+moment(access['deadline'],zone),
+        'access':'Нет данных' if access is None else 'не оплачен' if (
+            access.get('billing',{}).get('mode')=='monthly' and
+            access['billing'].get('price_kopecks',0)>0 and access['billing'].get('paid_until') is None
+        ) else 'бессрочный' if access.get('deadline') is None else 'до '+moment(access['deadline'],zone),
         'statistics_since':moment(t.get('traffic_started_at'),zone),'timezone':str(zone)}
+
+def format_billing(snapshot,*,stale=False):
+    from shared.billing_status import validate_billing
+    if snapshot is None:
+        return dict(available=False,balance='Нет данных',price='Нет данных',paid='Нет данных',
+            funds='Сервер не передаёт сведения о подписке',pause='',updated='Время обновления неизвестно')
+    data=validate_billing(snapshot)
+    zone=ZoneInfo(data['timezone'])
+    def money(value):
+        sign='-' if value<0 else ''
+        whole,fraction=divmod(abs(value),100)
+        return f'{sign}{whole},{fraction:02d} ₽'
+    def inclusive(value):
+        if value is None: return 'Не оплачен'
+        return 'до '+datetime.fromtimestamp(value-1,zone).strftime('%d.%m.%Y')+' включительно'
+    zero=data['price_kopecks']==0 and data['mode']=='monthly'
+    paid='Бессрочно' if zero else 'Прежний ручной срок' if data['mode']=='legacy' else inclusive(data['paid_until'])
+    funds='Бессрочно' if zero else ('За пределами календарного расчёта' if data['projection_limited'] else
+        'Недостаточно на один месяц' if data['projection_kind']=='insufficient' else
+        'После подключения клиента' if data['projection_kind']=='unavailable' else
+        'Прежний ручной срок' if data['projection_kind']=='legacy' else inclusive(data['funds_until']))
+    if data['projection_kind']=='resume_today' and data['funds_until'] is not None: funds+=' при запуске сегодня'
+    if data['pause_reason']=='manual' and not zero: funds+=' при возобновлении сейчас'
+    pause={None:'','manual':'Ручная пауза — пополнение не запускает доступ',
+        'insufficient_funds':'Доступ приостановлен: требуется оплата месяца',
+        'revoked':'Доступ отозван','pending':'Ожидает подключения',
+        'clock_error':'Ожидает проверки времени сервера'}[data['pause_reason']]
+    return dict(available=True,balance=money(data['balance_kopecks']),price=money(data['price_kopecks'])+' / месяц',
+        paid=paid,funds=funds,pause=pause,
+        updated=('Последние известные данные: ' if stale else 'Обновлено: ')+moment(data['updated_at'],zone))

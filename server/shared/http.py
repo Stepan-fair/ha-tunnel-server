@@ -6,6 +6,8 @@ import secrets
 import time
 from aiohttp import web
 
+DIAGNOSTICS = web.AppKey('diagnostics',object)
+
 
 class Limits:
     def __init__(self):
@@ -36,9 +38,11 @@ async def safe_errors(request, handler):
         response=await handler(request)
     except web.HTTPException as exc:
         response=web.json_response({'error':exc.reason},status=exc.status)
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError) as exc:
+        _diagnose(request,exc,400)
         response=web.json_response({'error':'Invalid request'},status=400)
-    except Exception:
+    except Exception as exc:
+        _diagnose(request,exc,503)
         # Do not log request bodies, JWTs, credentials or exception repr.
         response=web.json_response({'error':'Service unavailable'},status=503)
     response.headers.update({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
@@ -47,6 +51,16 @@ async def safe_errors(request, handler):
     if request.get('trusted_https'):
         response.headers['Strict-Transport-Security']='max-age=31536000'
     return response
+
+
+def _diagnose(request,error,status):
+    diagnostic=request.app.get(DIAGNOSTICS)
+    if diagnostic:
+        resource=request.match_info.route.resource
+        route=resource.canonical if resource else 'unknown'
+        diagnostic.event('http_error',component='http',level='ERROR',fields={
+            'method':request.method,'route':route,'status':status,'request_id':secrets.token_hex(8)})
+        if status>=500: diagnostic.failure('http_error',error,component='http',fatal=False)
 
 
 def ingress_middleware(options, csrf_key, admin_check=None):

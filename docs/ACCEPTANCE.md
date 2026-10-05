@@ -1,3 +1,7 @@
+# Приёмка обновления 0.4.0
+
+5 октября 2026: Windows440passed,13 Linux-only tests require CI (11 прежних и 2 новых). Месяцы, целые копейки, повторные запросы/перезапуск, атомарность, ручная пауза, цена0, границы компенсации, безопасный статус Client, резервные копии и фазы переноса проверены локально. Linux FRP, контейнеры, скан и действующий HA новой версии пока не подтверждены. Выпуск и установка учитываются отдельно; пропуски Windows не доказывают работу Linux.
+
 # Приёмка обновления 0.3.1
 
 Дата: 4 октября 2026. Обновление установлено и проверено на действующих HA. Полная внешняя приёмка и автоматическое обновление по расписанию остаются открытыми.
@@ -87,3 +91,15 @@ Linux-серия предыдущей версии 0.1.0: **101 passed, 0 skippe
 8. Из интернета и обычного LAN проверить недоступность панелей, OIDC discovery, FRP policy и внутренних HTTP-портов.
 
 Только после фиксации результатов всех обязательных сценариев можно менять статус готовности.
+
+
+## Дополнительная security-приёмка 0.3.3, 4 октября 2026
+
+Windows289passed/11Linux-onlyskipped/8warnings; release Linux обеих ролей300passed/0skipped/8warnings, real FRP/Nginx/MQTT. Новые PR CI также300passed. Grype full image:0fixableHigh/Critical,0Critical; остаются14uniqueunfixedHigh (55package matches), не подавлены/не объявлены исправленными. Debianlocal/tool paths reviewed; при появлении vendorfix пересобрать/повторитьscan/tests. Публичные36слоёв образов поSHA прочитаны анонимно, Server49/Client37productionfiles совпали с tag, реальные credentials не найдены.
+
+Server index digest728e210b27349296a941da2a15226aa508a4db68a9fb34ddd62c33c1b6dfce49; Client19d4dfd4fb21abe4f587118b0c4fe04c4230412cb859379d524c34ff988d48bd. Установленные RepoDigests совпали. Server identity/invitations/CA keys и Clientcredentials/CA/instanceidUNCHANGED; privatebackup только на соответствующем HA /share/ha-tunnel-security-fix-20261004/pre-update-{server,client}-032 dirs700/files600. Не экспортировать/не публиковать.
+
+На тестовом действующем клиенте pause403→start200; другой клиент и независимый доступ HTTP200 в обеих фазах. После временного DNS сбоя повторная проверка прошла. Подделка публичных административных заголовков404, HTTP с поддельным X-Forwarded-Proto301, HTTPS health200/HSTS, TLS1.3 с проверкой имени, WSS auth_required. Полный отзыв и повторная регистрация действующего клиента в этой фазе не повторялись; изолированные Linux проверки прошли. Core, независимый доступ и NPM не перезапускались. Старая задача auto-update schedule/длительная Companion session/внешний wildcardrenew не объявляются проверенными этой security-приёмкой. Старые localapps по-прежнему остановлены, не удалялись.
+
+
+Подробности — PROGRESS.md и итоговый security report. Таблица ранней общей приёмки выше историческая; schedule auto-update, Companion long session и внешний wildcard renew этой проверкой не подтверждены.

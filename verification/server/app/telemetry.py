@@ -81,11 +81,13 @@ class TelemetryService:
                     if isinstance(outcome,Exception):
                         self.results.pop(client['client_id'],None)
                         self.error='probe_storage_error'
+                        if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',outcome,component='telemetry',fatal=False)
                     else:
                         snap=self.snapshot(client['client_id'])
                         for key in ('frp_connected','ha_available'):
                             Journal(self.store).transition(client['client_id'],key,snap[key],self.now())
-            except Exception:
+            except Exception as error:
+                if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',error,component='telemetry',fatal=False)
                 self.results.clear()
                 self.error='probe_storage_error'
             finally:

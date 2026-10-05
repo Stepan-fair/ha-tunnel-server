@@ -14,8 +14,8 @@ def server_config(pki, port=7000, http_port=18080, plugin_port=19000, bind='0.0.
 
 
 class ServerRuntime(FrpRuntime):
-    def __init__(self, binary, config_path, store, access=None):
-        super().__init__(binary,config_path)
+    def __init__(self, binary, config_path, store, access=None, *, diagnostics=None):
+        super().__init__(binary,config_path,diagnostics=diagnostics)
         self.store = store
         self.access = access
 

@@ -30,7 +30,10 @@ def append_event(db, *, action, actor=None, client_id=None, domain=None,
         raise ValueError('Invalid audit action')
     # Only bounded non-secret fields from our own templates, never raw exceptions/requests.
     safe = {}
-    for name in ('deadline', 'available', 'count', 'reason', 'revision', 'duration', 'timezone'):
+    for name in ('balance_kopecks','price_kopecks','delta_kopecks','days'):
+        value=(details or {}).get(name)
+        if type(value) is int and -(2**63)<=value<2**63: safe[name]=value
+    for name in ('deadline', 'paid_until', 'available', 'count', 'reason', 'revision', 'duration', 'timezone'):
         value = (details or {}).get(name)
         if name == 'reason' and value not in ('invalid_request', 'unavailable', 'interrupted', 'storage_error'):
             continue
