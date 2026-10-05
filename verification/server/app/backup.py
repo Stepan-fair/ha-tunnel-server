@@ -12,7 +12,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from server.app.store import Store
 from server.app.store import digest
-from server.app.migrations import EXTRA_COLUMNS
+from server.app.migrations import EXTRA_COLUMNS, BILLING_COLUMNS
+from server.app.backup_billing import validate_subscription, restore_financial, restore_availability
 from server.app.duration import parse_duration
 from server.app.invitations import InvitationVault
 from zoneinfo import ZoneInfo
@@ -43,26 +44,41 @@ def export_state(directory,store,password):
     with store.connection() as db:
         db.execute('BEGIN')
         rows=[dict(row) for row in db.execute('SELECT * FROM clients')]
-        metadata=[dict(row) for row in db.execute('SELECT * FROM server_metadata')]
+        if store.migrating: raise ValueError('Wait for domain migration to complete')
+        metadata=[dict(row) for row in db.execute("SELECT * FROM server_metadata WHERE name NOT LIKE 'domain_migration%'")]
         commands=[dict(row) for row in db.execute('SELECT * FROM access_commands')]
         if db.execute('SELECT COUNT(*) FROM audit_events').fetchone()[0]>EXPORT_EVENT_LIMIT:
             raise BackupTooLarge('Journal exceeds portable backup limit')
         audit=[dict(row) for row in db.execute('SELECT * FROM audit_events LIMIT ?', (EXPORT_EVENT_LIMIT,))]
+        for table in ('billing_operations','billing_commands'):
+            if db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]>EXPORT_EVENT_LIMIT:
+                raise BackupTooLarge('Financial journal exceeds portable backup limit')
+        billing_operations=[dict(row) for row in db.execute('SELECT * FROM billing_operations')]
+        billing_commands=[dict(row) for row in db.execute('SELECT * FROM billing_commands')]
+        availability={}
+        for name,table in (('episodes','outage_episodes'),('entitlements','outage_entitlements')):
+            if db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]>EXPORT_EVENT_LIMIT: raise BackupTooLarge('Availability history exceeds portable limit')
+            availability[name]=[dict(row) for row in db.execute('SELECT * FROM '+table)]
+    financial=bool(availability['episodes'] or any(item['name'].startswith('service_') for item in metadata) or billing_operations or billing_commands or any(row['billing_mode']=='monthly' for row in rows))
+    header=b'HATB4' if financial else HEADER
+    if not financial:
+        rows=[{name:row[name] for name in COLUMNS+tuple(EXTRA_COLUMNS)} for row in rows]
     for row in rows:
         if row['code_ciphertext'] is not None:
             row['code_ciphertext']=base64.b64encode(row['code_ciphertext']).decode()
     names=FILES+(('invitations.key',) if (directory/'invitations.key').exists() else ())
-    payload={'version':3,'audit':audit,'base_domain':store.base_domain,'clients':rows,'metadata':metadata,'commands':commands,
+    payload={'version':4 if financial else 3,'audit':audit,'base_domain':store.base_domain,'clients':rows,'metadata':metadata,'commands':commands,
              'files':{name:base64.b64encode((directory/name).read_bytes()).decode() for name in names}}
+    if financial: payload.update(billing_operations=billing_operations,billing_commands=billing_commands,availability=availability)
     raw=json.dumps(payload,separators=(',',':')).encode()
     if len(raw)>EXPORT_RAW_LIMIT:
         raise BackupTooLarge('State exceeds portable backup limit')
     salt,nonce=secrets.token_bytes(16),secrets.token_bytes(12)
-    return HEADER+salt+nonce+AESGCM(key(password,salt)).encrypt(nonce,raw,HEADER)
+    return header+salt+nonce+AESGCM(key(password,salt)).encrypt(nonce,raw,header)
 
 
 def validate_row(row,base_domain,version=1):
-    columns=set(COLUMNS) | (set(EXTRA_COLUMNS) if version>=2 else set())
+    columns=set(COLUMNS) | (set(EXTRA_COLUMNS) if version>=2 else set()) | (set(BILLING_COLUMNS) if version>=4 else set())
     if not isinstance(row,dict) or set(row)!=columns: raise ValueError()
     if not isinstance(row['id'],str) or not re.fullmatch('[a-f0-9]{32}',row['id']): raise ValueError()
     host=domain(row['domain'])
@@ -86,7 +102,8 @@ def validate_row(row,base_domain,version=1):
         if value is not None and (type(value) not in (int,float) or not math.isfinite(value) or value<0): raise ValueError()
     ZoneInfo(row['timezone'])
     if row['duration'] is not None: parse_duration(json.loads(row['duration']))
-    if (row['duration'] is None)!=(row['deadline'] is None): raise ValueError()
+    if version>=4: validate_subscription(row)
+    if (version<4 or row['billing_mode']=='legacy') and (row['duration'] is None)!=(row['deadline'] is None): raise ValueError()
     caps=json.loads(row['capabilities'])
     if not isinstance(caps,list) or len(caps)>2 or any(c not in ('access-v1','telemetry-v1') for c in caps): raise ValueError()
     value=row['status_secret_hash']
@@ -105,7 +122,7 @@ def restore_metadata(db,payload):
         value=json.loads(item['value'])
         if item['name']=='instance_id':
             if not isinstance(value,str) or not re.fullmatch('[a-f0-9]{32}',value): raise ValueError()
-        elif item['name']=='clock_anchor':
+        elif item['name'] in ('clock_anchor','service_last_healthy','service_shutdown_at'):
             if type(value) not in (int,float) or not math.isfinite(value) or value<0: raise ValueError()
         elif item['name']=='audit_running':
             if type(value) is not bool: raise ValueError()
@@ -152,14 +169,14 @@ def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
     previous=directory.with_name(directory.name+'.pre-restore')
     if current.list_clients() or previous.exists():
         raise ValueError('Restore requires an empty server without a previous restore')
-    if not isinstance(blob,bytes) or not 49<=len(blob)<=10*1024*1024 or blob[:5] not in (b'HATB1',b'HATB2',HEADER):
+    if not isinstance(blob,bytes) or not 49<=len(blob)<=10*1024*1024 or blob[:5] not in (b'HATB1',b'HATB2',HEADER,b'HATB4'):
         raise ValueError('Invalid backup')
     try:
         raw=AESGCM(key(password,blob[5:21])).decrypt(blob[21:33],blob[33:],blob[:5])
         if len(raw)>8*1024*1024: raise ValueError()
         payload=json.loads(raw)
         version=int(chr(blob[4]))
-        fields={'version','base_domain','clients','files'} | ({'metadata','commands'} if version>=2 else set()) | ({'audit'} if version==3 else set())
+        fields={'version','base_domain','clients','files'} | ({'metadata','commands'} if version>=2 else set()) | ({'audit'} if version>=3 else set()) | ({'billing_operations','billing_commands','availability'} if version>=4 else set())
         if (set(payload)!=fields or payload['version']!=version or
                 payload['base_domain']!=base_domain or not set(FILES)<=set(payload['files']) or
                 not set(payload['files'])<=set(FILES+(('invitations.key',) if version>=2 else ())) or
@@ -173,11 +190,15 @@ def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
                     validate_row(row,base_domain,version)
                     if not row['revoked'] and row['domain'].split('.')[0] in fresh.reserved:
                         raise ValueError('Restored client conflicts with server name')
-                    columns=COLUMNS+tuple(EXTRA_COLUMNS) if version>=2 else COLUMNS+('status_secret_hash',)
+                    columns=COLUMNS+tuple(EXTRA_COLUMNS)+(tuple(BILLING_COLUMNS) if version>=4 else ()) if version>=2 else COLUMNS+('status_secret_hash',)
                     values=[row[name] for name in columns] if version>=2 else [row[name] for name in COLUMNS]+[row['secret_hash']]
                     db.execute('INSERT INTO clients ('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')',values)
                 if version>=2: restore_metadata(db,payload)
-                if version==3: restore_audit(db,payload['audit'])
+                if version>=3: restore_audit(db,payload['audit'])
+                if version>=4:
+                    restore_financial(db,payload)
+                    restore_availability(db,payload)
+                else: db.execute("UPDATE clients SET billing_mode='legacy',billing_timezone=timezone WHERE deadline IS NOT NULL OR duration IS NOT NULL")
             for name in payload['files']:
                 data=base64.b64decode(payload['files'][name],validate=True)
                 if len(data)>16384: raise ValueError()
@@ -190,7 +211,7 @@ def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
             # An older snapshot cannot know which credentials were revoked later.
             # Restore identities/history, never historical authorization material.
             with fresh.connection() as db:
-                db.execute('UPDATE clients SET revoked=1,paused=0,secret_hash=NULL,status_secret_hash=NULL,code_hash=NULL,code_ciphertext=NULL,generation=generation+1,revision=revision+1')
+                db.execute('UPDATE clients SET revoked=1,'+('' if version>=4 else 'paused=0,')+'secret_hash=NULL,status_secret_hash=NULL,code_hash=NULL,code_ciphertext=NULL,generation=generation+1,revision=revision+1')
                 db.execute('DELETE FROM access_commands')
             (staged/'identity.key').unlink()
             Authority(staged/'identity.key','http://127.0.0.1:19000')

@@ -45,7 +45,7 @@ class SetupService:
     def __init__(self,directory,supervisor):
         self.directory=Path(directory); self.supervisor=supervisor
         self.options={}; self.detected={}; self.has_clients=self._has_clients
-        self.on_saved=None; self.journal=None
+        self.on_saved=None; self.journal=None; self.diagnostics=None
         self.lock=asyncio.Lock()
         self.check_lock=asyncio.Lock()
 
@@ -156,6 +156,8 @@ def make_setup_app(setup,admin_check,*,ingress_ips=None):
         try: return await handler(request)
         finally: current_actor.reset(token)
     app=web.Application(client_max_size=16384,middlewares=[safe_errors,guard])
+    from server.app.diagnostics_web import add_diagnostics_routes
+    add_diagnostics_routes(app,setup.diagnostics)
     async def snapshot(request):
         result=setup.snapshot(); result.update(csrf=csrf_for(key,request.headers['X-Remote-User-Id']),user_id=request.headers['X-Remote-User-Id'])
         return web.json_response(result)

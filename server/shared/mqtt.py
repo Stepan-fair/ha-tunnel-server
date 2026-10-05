@@ -82,7 +82,8 @@ class MqttBridge:
             client.loop_start()
             self.state='connecting'
             self.next_retry=time.monotonic()+60
-        except Exception:
+        except Exception as error:
+            if getattr(self,'diagnostics',None): self.diagnostics.failure('service_error',error,component='mqtt',fatal=False)
             self.state='service_error'; self.next_retry=time.monotonic()+30
 
     async def handle_command(self,topic,payload,retained):
@@ -117,7 +118,9 @@ class MqttBridge:
                 atomic_write(self.discovery_cache,json.dumps(sorted(present)).encode())
             self.configs=present
             self.state='connected'
-        except Exception: self.state='publish_error'
+        except Exception as error:
+            if getattr(self,'diagnostics',None): self.diagnostics.failure('service_error',error,component='mqtt',fatal=False)
+            self.state='publish_error'
 
     async def _loop(self):
         while True:

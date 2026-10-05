@@ -208,7 +208,8 @@ class ClientRelay:
                     self.rates_updated[cid] = now
                     self.samples[cid] = (now, counts)
             self.telemetry_error = None
-        except Exception:
+        except Exception as error:
+            if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',error,component='relay',fatal=False)
             self.telemetry_error = 'traffic_storage_error'
             self.rate_values.clear()
             self.rates_updated.clear()

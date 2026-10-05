@@ -56,12 +56,14 @@ class Controller:
         self.server_access=None
         self.telemetry=None
         self.status_received=None
+        self.billing_stale=True
         self.mqtt=None
 
     def status(self):
         return {'state':self.state,'message':self.message,'configured':self.credentials is not None,
                 'domain':self.credentials['domain'] if self.credentials else None,
                 'busy':self.lock.locked(),'access':self.server_access,
+                'billing_stale':self.billing_stale or self.status_received is None or asyncio.get_running_loop().time()-self.status_received>45,
                 'telemetry':age_telemetry(self.telemetry,asyncio.get_running_loop().time()) if self.telemetry else None,
                 'mqtt':self.mqtt.status() if self.mqtt else {'state':'not_configured'}}
 
@@ -144,8 +146,10 @@ class Controller:
 
     async def poll_access(self):
         c=self.credentials
+        self.billing_stale=True
         result=await ClientStatusClient(c['server_url']).fetch(c['client_id'],c['secret'])
         self.server_access=result
+        self.billing_stale=False
         self.status_received=asyncio.get_running_loop().time()
         if result is None: return True
         self.telemetry=parse_telemetry(result['telemetry'],self.status_received) if result.get('telemetry') else None

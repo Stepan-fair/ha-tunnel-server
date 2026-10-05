@@ -7,7 +7,7 @@ def nginx_config(trusted_ips):
     addresses=[str(ipaddress.ip_address(ip)) for ip in trusted_ips]
     allow='\n'.join(f'allow {ip};' for ip in addresses)
     return '''pid /tmp/ha-tunnel-nginx.pid;
-error_log stderr crit;
+error_log stderr warn;
 events { worker_connections 1024; }
 http {
   client_body_temp_path /tmp/ha-tunnel-nginx-body;

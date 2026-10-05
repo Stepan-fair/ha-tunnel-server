@@ -30,6 +30,7 @@ def digest(value: str) -> str:
 class Store:
     def __init__(self, path: Path, base_domain: str, reserved=(), server_host=None, *, clock=None, vault=None):
         self.clock = clock
+        self.migrating=False
         self.vault = vault
         self.live_proxies = {}
         self.live_sessions = {}
@@ -74,6 +75,7 @@ class Store:
             return Enrollment(client_id, row['domain'], code, row['expires'])
 
     def reissue(self, client_id, now, *, actor=None):
+        if self.migrating: raise ConflictError('Domain migration is in progress')
         code = secrets.token_urlsafe(32)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -87,13 +89,20 @@ class Store:
         return Enrollment(client_id, row['domain'], code, now+900)
 
     def _snapshot(self, row, now):
-        expired = row['deadline'] is not None and now >= row['deadline']
-        clock_error = row['deadline'] is not None and hasattr(self.clock, 'reliable') and not self.clock.reliable
+        from server.app.subscription import billing_snapshot
+        reliable=not hasattr(self.clock,'reliable') or self.clock.reliable
+        billing=billing_snapshot(row,now,reliable=reliable)
+        monthly=row['billing_mode']!='legacy'
+        deadline=(row['paid_until'] if row['price_kopecks']>0 else None) if monthly else row['deadline']
+        expired=(row['price_kopecks']>0 and (deadline is None or row['paid_from'] is None or now<row['paid_from'] or now>=deadline)) if monthly else deadline is not None and now>=deadline
+        clock_error = (row['price_kopecks']>0 if monthly else deadline is not None) and not reliable
         state = ('revoked' if row['revoked'] else 'pending' if not row['secret_hash'] else
+                 'paused' if monthly and row['paused'] else 'clock_error' if monthly and clock_error else
                  'expired' if expired else 'paused' if row['paused'] else 'clock_error' if clock_error else 'allowed')
+        if self.migrating and state=='allowed': state='clock_error'
         return dict(client_id=row['id'], id=row['id'], domain=row['domain'], enrolled=bool(row['secret_hash']),
             revoked=bool(row['revoked']), paused=bool(row['paused']), expired=expired, access_state=state,
-            deadline=row['deadline'], duration=json.loads(row['duration']) if row['duration'] else None,
+            deadline=deadline, duration=json.loads(row['duration']) if row['duration'] else None, billing=billing,
             timezone=row['timezone'], revision=row['revision'], generation=row['generation'],
             capabilities=json.loads(row['capabilities']), editable=bool(row['secret_hash']) and not bool(row['revoked']),
             to_client_bytes=row['to_client_bytes'], from_client_bytes=row['from_client_bytes'],
@@ -139,6 +148,7 @@ class Store:
                 not isinstance(command_id, str) or not 1 <= len(command_id) <= 128 or
                 type(expected_revision) is not int or expected_revision < 0):
             raise ValueError('Invalid access command')
+        if self.migrating: raise ConflictError('Domain migration is in progress')
         request = json.dumps([action, expected_revision, duration, timezone], sort_keys=True)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -151,6 +161,8 @@ class Store:
             if row is None:
                 raise ValueError('Unknown client')
             snap = self._snapshot(row, now)
+            if row['billing_mode']=='monthly' and action in ('set_duration','permanent'):
+                raise ConflictError('Use subscription price and balance')
             if row['revision'] != expected_revision:
                 raise ConflictError('Client policy has changed; refresh it')
             if action != 'revoke' and (row['revoked'] or not row['secret_hash']):
@@ -160,23 +172,36 @@ class Store:
                 paused = 1
             elif action == 'start':
                 paused = 0
-                if snap['expired'] and period:
+                if row['billing_mode']=='monthly' and snap['expired']:
+                    db.execute('UPDATE clients SET billing_paused=1 WHERE id=?',(client_id,))
+                if row['billing_mode']!='monthly' and snap['expired'] and period:
                     deadline = deadline_at(datetime.fromtimestamp(now, utc_timezone.utc), parse_duration(json.loads(period)), zone).timestamp()
             elif action == 'set_duration':
+                db.execute("UPDATE clients SET billing_mode='legacy' WHERE id=?",(client_id,))
                 parsed = parse_duration(duration)
                 deadline = deadline_at(datetime.fromtimestamp(now, utc_timezone.utc), parsed, timezone).timestamp()
                 period, zone, paused = json.dumps(asdict(parsed)), timezone, 0
             elif action == 'permanent':
+                db.execute("UPDATE clients SET billing_mode='free' WHERE id=?",(client_id,))
                 paused, deadline, period = 0, None, None
             if action == 'revoke':
                 db.execute('UPDATE clients SET revoked=1, code_hash=NULL, code_ciphertext=NULL, secret_hash=NULL, revision=revision+1 WHERE id=?', (client_id,))
             else:
                 db.execute('UPDATE clients SET paused=?,deadline=?,duration=?,timezone=?,revision=revision+1 WHERE id=?', (paused, deadline, period, zone, client_id))
-            result = self._snapshot(db.execute('SELECT * FROM clients WHERE id=?', (client_id,)).fetchone(), now)
+            updated=db.execute('SELECT * FROM clients WHERE id=?', (client_id,)).fetchone()
+            updated=self.reconcile_billing(db,updated,now,fresh_start=action=='start' and snap['expired'])
+            result = self._snapshot(updated, now)
             db.execute('INSERT INTO access_commands VALUES (?,?,?,?)', (client_id, command_id, request, json.dumps(result)))
             append_event(db, action=action, actor=actor, client_id=client_id, domain=row['domain'], at=now,
                          details={'deadline':result['deadline'], 'revision':result['revision'], 'timezone':result['timezone']})
         return result
+
+    def reconcile_billing(self,db,row,now,*,fresh_start=False):
+        if row['billing_mode']!='monthly' or not getattr(self,'billing_available',lambda:True)():
+            return row
+        if hasattr(self.clock,'reliable') and not self.clock.reliable: return row
+        from server.app.billing import BillingRepository
+        return BillingRepository(self)._reconcile(db,row,now,row['billing_timezone'],fresh_start=fresh_start)
 
     def record_expiry(self, client_id, now):
         with self.connection() as db:
@@ -198,6 +223,8 @@ class Store:
                 raise ConflictError('Revoke the client and refresh before deleting it')
             append_event(db,action='delete',actor=actor,client_id=client_id,domain=row['domain'],at=self.now())
             db.execute('DELETE FROM access_commands WHERE client_id=?',(client_id,))
+            db.execute('DELETE FROM billing_commands WHERE client_id=?',(client_id,))
+            db.execute('DELETE FROM availability_checkpoint WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM clients WHERE id=?',(client_id,))
             for name in ('ha_available','frp_connected'):
                 db.execute('DELETE FROM server_metadata WHERE name=?',('audit:'+name+':'+client_id,))
@@ -223,6 +250,7 @@ class Store:
             db.close()
 
     def issue(self, name: str | None, now: int, *, actor=None) -> Enrollment:
+        if self.migrating: raise ConflictError('Domain migration is in progress')
         name = validation.label(name if name is not None else 'ha-' + secrets.token_hex(5))
         if name in self.reserved:
             raise ValueError('Name is reserved')
@@ -244,6 +272,7 @@ class Store:
         return Enrollment(identifier, fqdn, code, now + 900)
 
     def redeem(self, code: str, now: int, expected_client_id=None, *, actor=None) -> Credentials:
+        if self.migrating: raise ConflictError('Domain migration is in progress')
         validation.token(code)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -254,11 +283,13 @@ class Store:
                 raise ValueError('Connection code belongs to a different client')
             secret = secrets.token_urlsafe(32)
             rebind = int(bool(row['revoked']) or row['status_secret_hash'] is not None)
-            if row['revoked']:
+            if row['revoked'] and row['billing_mode']!='monthly':
                 deadline=deadline_at(datetime.fromtimestamp(now,utc_timezone.utc),parse_duration(json.loads(row['duration'])),row['timezone']).timestamp() if row['duration'] else None
                 db.execute('UPDATE clients SET paused=0,deadline=? WHERE id=?',(deadline,row['id']))
             db.execute('UPDATE clients SET code_hash=NULL,code_ciphertext=NULL,secret_hash=?,status_secret_hash=?,revoked=0,generation=generation+?,revision=revision+?,traffic_started_at=COALESCE(traffic_started_at,?) WHERE id=?',
                        (digest(secret), digest(secret), rebind, rebind, now, row['id']))
+            updated=db.execute('SELECT * FROM clients WHERE id=?',(row['id'],)).fetchone()
+            self.reconcile_billing(db,updated,now)
             result = Credentials(row['id'], row['domain'], secret)
             append_event(db, action='redeem', actor=actor or Actor('client'), client_id=row['id'], domain=row['domain'], at=now)
         return result

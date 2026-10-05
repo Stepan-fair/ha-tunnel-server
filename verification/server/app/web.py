@@ -15,7 +15,7 @@ from server.app.duration import parse_duration,deadline_at
 from datetime import datetime,timezone,timedelta,date
 from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
 from server.app.journal import Actor, Journal, current_actor
-from shared.presentation import format_metrics
+from shared.presentation import format_metrics,format_billing
 from shared.help import documentation
 
 
@@ -122,6 +122,7 @@ def make_public_app(store, authority, options, access=None, telemetry=None):
         if not isinstance(data,dict) or set(data)!={'capabilities'}: raise ValueError()
         store.set_capabilities(client.client_id,data['capabilities'])
         result=store.access_snapshot(client.client_id,store.now())
+        result['billing']['updated_at']=store.now()
         if telemetry is not None: result['telemetry']=telemetry.snapshot(client.client_id)
         return web.json_response(result)
 
@@ -155,7 +156,7 @@ def make_plugin_app(store, authority, bandwidth_limit_mb=10):
     return app
 
 
-def make_ingress_app(store, authority, options, disconnect, backup_export=None, backup_restore=None, access=None, telemetry=None, mqtt=None, setup=None,journal=None,admin_check=None):
+def make_ingress_app(store, authority, options, disconnect, backup_export=None, backup_restore=None, access=None, telemetry=None, mqtt=None, setup=None,journal=None,admin_check=None,diagnostics=None,migration=None):
     key=secrets.token_bytes(32)
     journal=journal or Journal(store)
     def actor(request): return Actor('web',request.headers['X-Remote-User-Id'])
@@ -170,6 +171,8 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
             raise
         finally: current_actor.reset(token)
     app=web.Application(client_max_size=14*1024*1024,middlewares=[safe_errors,ingress_middleware(options,key,admin_check),audit_errors])
+    from server.app.diagnostics_web import add_diagnostics_routes
+    add_diagnostics_routes(app,diagnostics)
     def filters(request):
         result={}
         for name in ('client_id','action','result','since','until'):
@@ -208,6 +211,8 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
         if telemetry is not None:
             for client in clients: client['telemetry']=telemetry.snapshot(client['client_id'])
         for client in clients:
+            client['billing']['updated_at']=store.now()
+            client['billing_presentation']=format_billing(client['billing'])
             client['presentation']=format_metrics(client.get('telemetry'),client,
                 setup.detected.get('timezone','UTC') if setup else client.get('timezone','UTC'))
         return web.json_response({'clients':[c for c in clients if not c['revoked']],
@@ -215,6 +220,20 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
             'csrf':csrf_for(key,request.headers['X-Remote-User-Id']), 'server':options['server_url'],
             'timezone':setup.detected.get('timezone','UTC') if setup else 'UTC',
             'mqtt':mqtt.status() if mqtt else {'state':'not_configured'}})
+    async def migration_preview(request):
+        if migration is None: raise web.HTTPServiceUnavailable()
+        data=await request.json()
+        if not isinstance(data,dict) or set(data)!={'draft'}: raise ValueError()
+        try:return web.json_response(await migration.preview(data['draft']))
+        except ConflictError:raise web.HTTPConflict()
+
+    async def migration_apply(request):
+        if migration is None: raise web.HTTPServiceUnavailable()
+        data=await request.json()
+        if not isinstance(data,dict) or set(data)!={'draft','command_id','revision'}: raise ValueError()
+        try:return web.json_response(await migration.apply(data['draft'],data['command_id'],data['revision'],actor=actor(request)))
+        except ConflictError:raise web.HTTPConflict(reason='Обновите предпросмотр и проверьте DNS/TLS.')
+
     async def setup_state(request):
         if setup is None: raise web.HTTPServiceUnavailable()
         result=setup.snapshot(); result['csrf']=csrf_for(key,request.headers['X-Remote-User-Id'])
@@ -265,6 +284,17 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
             result=await access.command(request.match_info['client_id'],data['action'],data['command_id'],data['revision'],data.get('duration'),data.get('timezone','UTC'),actor=actor(request))
         except ConflictError: raise web.HTTPConflict(reason='Client policy changed or client update required')
         return web.json_response(result)
+    async def change_billing(request):
+        if access is None: raise web.HTTPServiceUnavailable()
+        data=await request.json()
+        if not isinstance(data,dict) or set(data)!={'action','command_id','revision','value_kopecks'}: raise ValueError()
+        zone=setup.detected.get('timezone','UTC') if setup else 'UTC'
+        try:
+            result=await access.billing_command(request.match_info['client_id'],data['action'],data['command_id'],
+                data['revision'],value_kopecks=data['value_kopecks'],timezone=zone,actor=actor(request))
+        except ConflictError: raise web.HTTPConflict()
+        return web.json_response(result)
+
     async def invitation(request):
         data=await request.json()
         if data!={}: raise ValueError()
@@ -319,10 +349,12 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
     app.add_routes([web.get('/',index),web.get('/api/help',help_page),web.get('/api/state',state),web.get('/api/journal',journal_page),web.get('/api/journal/meta',journal_meta),
                     web.get('/api/setup',setup_state),web.post('/api/setup',setup_save),
                     web.post('/api/setup/check',setup_check),
+                    web.post('/api/domain-migration/preview',migration_preview),web.post('/api/domain-migration/apply',migration_apply),
                     web.get('/api/journal/export',journal_export),web.post('/api/clients',issue),
                     web.post('/api/clients/{client_id}/revoke',revoke),
                     web.post('/api/clients/{client_id}/delete',delete),
                     web.post('/api/clients/{client_id}/access',change_access),
+                    web.post('/api/clients/{client_id}/billing',change_billing),
                     web.post('/api/clients/{client_id}/invitation/{operation:show|reissue}',invitation),
                     web.post('/api/duration/preview',preview_duration),
                     web.post('/api/backup/export',export),web.post('/api/backup/restore',restore),web.get('/{name}',asset)])
