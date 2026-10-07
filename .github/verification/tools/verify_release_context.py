@@ -20,6 +20,17 @@ def inventory(root):
 
 
 def verify_release_context(repository,component):
+    repository=Path(repository)
+    # Match Supervisor discovery without exposing CI's copies as installable apps.
+    configs={
+        path.relative_to(repository).as_posix()
+        for path in repository.glob('**/config.*')
+        if path.suffix in ('.yaml','.yml','.json')
+        and not any(part.startswith('.') or part=='rootfs'
+                    for part in path.relative_to(repository).parts)
+    }
+    if configs!={f'{component}/config.yaml'}:
+        raise ValueError('Unexpected discoverable application configuration')
     with tempfile.TemporaryDirectory(prefix='ha-tunnel-context-') as temporary:
         package(Path(temporary)/'expected',component=component)
         expected=inventory(Path(temporary)/'expected'/component)
