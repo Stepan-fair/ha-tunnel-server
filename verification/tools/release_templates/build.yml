@@ -24,6 +24,8 @@ jobs:
         run: python verification/tools/verify_release_context.py --repository . --component __ROLE__
       - name: Verify browser access commands without secure-context randomUUID
         run: node verification/tests/command_id.test.cjs
+      - name: Verify visible financial summary and polling
+        run: node verification/tests/billing_overview.test.cjs
       - name: Build isolated Linux verification image
         run: docker build -t ha-tunnel-verification -f verification/tools/Dockerfile.test verification
       - name: Require real FRP Nginx and MQTT tests with no skips
