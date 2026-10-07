@@ -12,6 +12,7 @@ def release_repository(component,output):
     package(output,component=component)
     # Keep the duplicate production/verification text identical on all runners.
     (Path(output)/'.gitattributes').write_text('* text eol=lf\n',encoding='utf-8')
+    (Path(output)/'.gitignore').write_text('__pycache__/\n*.py[cod]\n.pytest_cache/\n',encoding='utf-8')
     target=Path(output)/'.github/workflows/build.yml'
     target.parent.mkdir(parents=True,exist_ok=True)
     text=(ROOT/'tools/release_templates/build.yml').read_text(encoding='utf-8')
