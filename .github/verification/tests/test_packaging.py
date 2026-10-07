@@ -84,8 +84,8 @@ def test_release_runs_real_linux_tests_before_publication(tmp_path):
     workflow=YAML(typ='safe').load((output/'.github/workflows/build.yml').read_text())
     assert workflow['jobs']['build']['needs']=='security-tests'
     assert workflow['jobs']['security-tests']['permissions']=={'contents':'read'}
-    assert (output/'verification/tests/test_security_hardening.py').exists()
-    assert (output/'verification/tools/Dockerfile.test').exists()
+    assert (output/'.github/verification/tests/test_security_hardening.py').exists()
+    assert (output/'.github/verification/tools/Dockerfile.test').exists()
     assert not any(p.name in ('PROGRESS.md','credentials.json','AGENTS.md','.tools') for p in output.rglob('*'))
     build_step=next(s for s in workflow['jobs']['build']['steps'] if s.get('uses','').startswith('docker/build-push-action@'))
     assert build_step['with']['sbom'] is True
@@ -115,3 +115,32 @@ def test_release_gate_rejects_modified_or_extra_production_files(tmp_path):
     (output/'server/credentials.json').write_text('{}')
     with pytest.raises(ValueError,match='Production context differs'):
         verify_release_context(output,'server')
+
+
+@pytest.mark.parametrize('role', ['server', 'client'])
+def test_role_release_exposes_only_requested_application(tmp_path, role):
+    from tools.release_repository import release_repository
+    output = tmp_path / 'repository'
+    release_repository(role, output)
+    # Supervisor scans recursively, excluding dot directories and rootfs.
+    visible = sorted(
+        path.relative_to(output).as_posix()
+        for path in output.glob('**/config.*')
+        if path.suffix in ('.yaml', '.yml', '.json')
+        and not any(part.startswith('.') or part == 'rootfs'
+                    for part in path.relative_to(output).parts)
+    )
+    assert visible == [f'{role}/config.yaml']
+
+
+@pytest.mark.parametrize('config_name', ['config.yaml', 'config.yml', 'config.json'])
+def test_release_gate_rejects_extra_discoverable_configs(tmp_path, config_name):
+    from tools.release_repository import release_repository
+    from tools.verify_release_context import verify_release_context
+    output = tmp_path / 'repository'
+    release_repository('client', output)
+    extra = output / 'samples' / config_name
+    extra.parent.mkdir()
+    extra.write_text('{}', encoding='utf-8')
+    with pytest.raises(ValueError, match='Unexpected discoverable application configuration'):
+        verify_release_context(output, 'client')

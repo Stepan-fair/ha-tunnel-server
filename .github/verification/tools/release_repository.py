@@ -19,7 +19,7 @@ def release_repository(component,output):
     script=Path(output)/'.github/scripts/guard_image.py'
     script.parent.mkdir(parents=True,exist_ok=True)
     script.write_bytes((ROOT/'tools/release_templates/guard_image.py').read_bytes())
-    verification=Path(output)/'verification'
+    verification=Path(output)/'.github'/'verification'
     for name in ('server','client','shared','tests','tools','docs'):
         for source in (ROOT/name).rglob('*'):
             if (source.is_file() and '__pycache__' not in source.parts and

@@ -21,13 +21,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Require production context to match tested sources
-        run: python verification/tools/verify_release_context.py --repository . --component __ROLE__
+        run: python .github/verification/tools/verify_release_context.py --repository . --component __ROLE__
       - name: Verify browser access commands without secure-context randomUUID
-        run: node verification/tests/command_id.test.cjs
+        run: node .github/verification/tests/command_id.test.cjs
       - name: Verify visible financial summary and polling
-        run: node verification/tests/billing_overview.test.cjs
+        run: node .github/verification/tests/billing_overview.test.cjs
       - name: Build isolated Linux verification image
-        run: docker build -t ha-tunnel-verification -f verification/tools/Dockerfile.test verification
+        run: docker build -t ha-tunnel-verification -f .github/verification/tools/Dockerfile.test .github/verification
       - name: Require real FRP Nginx and MQTT tests with no skips
         run: docker run --rm --network none --memory 768m --cpus 2 --pids-limit 256 ha-tunnel-verification python tools/security_ci.py
       - name: Build production image for vulnerability inspection
@@ -37,7 +37,7 @@ jobs:
           set -o pipefail
           docker save ha-tunnel-scan | docker run --rm -i --memory 768m --cpus 2 --pids-limit 128 --cap-drop ALL --security-opt no-new-privileges -e GRYPE_DB_CACHE_DIR=/tmp/grype-db --entrypoint /busybox/sh ghcr.io/anchore/grype@sha256:a640dcef403cda894efcba631ceb45ea324060771ce89d736598895ae1d18418 -c '/busybox/cat > /tmp/image.tar; /grype docker-archive:/tmp/image.tar -o json' > image-scan.json
       - name: Reject fixable severe vulnerabilities
-        run: python verification/tools/check_image_scan.py image-scan.json
+        run: python .github/verification/tools/check_image_scan.py image-scan.json
       - name: Preserve complete vulnerability report including unfixed findings
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
