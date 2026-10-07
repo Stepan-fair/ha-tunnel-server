@@ -1,5 +1,5 @@
 name: HA Tunnel Client
-version: "0.4.0"
+version: "0.4.1"
 slug: ha_tunnel_client
 description: Доступ к Home Assistant за CGNAT по одному коду подключения
 arch: [amd64]
