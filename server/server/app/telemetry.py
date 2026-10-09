@@ -73,19 +73,29 @@ class TelemetryService:
             tasks=[]
             try:
                 clients=self.store.list_clients()
-                tasks=[asyncio.create_task(self.probe_once(c['client_id'])) for c in clients]
+                current={c['client_id'] for c in clients}
+                for client_id in self.results.keys()-current:
+                    del self.results[client_id]
+                self.error=None
+                # A semaphore bounds active sockets, but one task per client
+                # still grows without bound. Workers consume a shared iterator.
+                pending=iter(clients)
+                async def worker():
+                    for client in pending:
+                        try:
+                            await self.probe_once(client['client_id'])
+                            snap=self.snapshot(client['client_id'])
+                            for key in ('frp_connected','ha_available'):
+                                Journal(self.store).transition(client['client_id'],key,snap[key],self.now())
+                        except Exception as outcome:
+                            self.results.pop(client['client_id'],None)
+                            self.error='probe_storage_error'
+                            if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',outcome,component='telemetry',fatal=False)
+                tasks=[asyncio.create_task(worker()) for _ in range(min(8,len(clients)))]
                 self.probes.update(tasks)
                 outcomes=await asyncio.gather(*tasks,return_exceptions=True)
-                self.error=None
-                for client,outcome in zip(clients,outcomes):
-                    if isinstance(outcome,Exception):
-                        self.results.pop(client['client_id'],None)
-                        self.error='probe_storage_error'
-                        if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',outcome,component='telemetry',fatal=False)
-                    else:
-                        snap=self.snapshot(client['client_id'])
-                        for key in ('frp_connected','ha_available'):
-                            Journal(self.store).transition(client['client_id'],key,snap[key],self.now())
+                if any(isinstance(outcome,Exception) for outcome in outcomes):
+                    raise RuntimeError('Telemetry worker failed')
             except Exception as error:
                 if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',error,component='telemetry',fatal=False)
                 self.results.clear()

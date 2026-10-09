@@ -1,5 +1,5 @@
 name: HA Tunnel Server
-version: "0.4.1"
+version: "0.4.2"
 slug: ha_tunnel_server
 description: Собственный сервер защищённого удалённого доступа к Home Assistant
 arch: [amd64]

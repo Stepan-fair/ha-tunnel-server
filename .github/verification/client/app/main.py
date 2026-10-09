@@ -62,6 +62,7 @@ async def main():
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         await runner.cleanup()
+        await controller.close()
         await runtime.stop()
         await mqtt.close()
 

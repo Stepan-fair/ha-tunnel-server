@@ -94,6 +94,10 @@ def make_public_app(store, authority, options, access=None, telemetry=None):
             'ca_pem':options['ca_pem'],'protocol':1})
 
     async def token(request):
+        # OAuth client credentials uses URL-encoded forms, never file uploads.
+        # Reject multipart before Request.post can allocate temporary files.
+        if request.content_type!='application/x-www-form-urlencoded':
+            raise web.HTTPUnsupportedMediaType()
         data=await request.post()
         if data.get('grant_type')!='client_credentials':
             raise web.HTTPBadRequest()

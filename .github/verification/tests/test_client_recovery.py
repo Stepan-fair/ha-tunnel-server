@@ -89,3 +89,44 @@ async def test_other_connection_api_requires_explicit_confirmation(tmp_path):
         assert (await client.post('/api/replace-connection',headers=headers,json={'invitation':'new','confirmed':True})).status==202
         await asyncio.sleep(0)
         assert ctrl.replacement==('new',True)
+
+
+async def test_monitor_cannot_overlap_credential_replacement(tmp_path,monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    ctrl,old=controller(tmp_path)
+    ctrl.state='connected'
+    ctrl.runtime.status=lambda:{'running':True}
+    entered,released,enrolling=asyncio.Event(),asyncio.Event(),asyncio.Event()
+    class Status:
+        def __init__(self,url): pass
+        async def fetch(self,*args):
+            entered.set()
+            await released.wait()
+            return {'client_id':old['client_id'],'access_state':'allowed','revision':0,'generation':0}
+        async def close(self): pass
+    async def enroll(*args,**kwargs):
+        enrolling.set()
+        return {**old,'secret':'z'*43}
+    monkeypatch.setattr(module,'ClientStatusClient',Status)
+    monkeypatch.setattr(module,'verify_tunnel_tls',AsyncMock())
+    monkeypatch.setattr(module,'proxy_running',AsyncMock(return_value=True))
+    monkeypatch.setattr(module,'check_http_ready',AsyncMock())
+    monkeypatch.setattr(module,'enroll',enroll)
+    ctrl.launch=AsyncMock(return_value=True)
+    monitor=asyncio.create_task(ctrl.monitor_once())
+    replacement=None
+    try:
+        await asyncio.wait_for(entered.wait(),1)
+        replacement=asyncio.create_task(ctrl.rebind('test-invitation'))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(enrolling.wait(),.05)
+        released.set()
+        await asyncio.gather(monitor,replacement)
+        assert ctrl.credentials['secret']=='z'*43
+        assert ctrl.server_access is None, 'Old in-flight status must not replace new binding state'
+        assert ctrl.state=='connecting'
+    finally:
+        released.set()
+        await asyncio.gather(monitor,*([replacement] if replacement else []),return_exceptions=True)
+        await ctrl.close()
