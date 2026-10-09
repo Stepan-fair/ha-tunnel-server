@@ -79,3 +79,58 @@ async def test_probe_redirect_is_not_followed(tmp_path):
         service=TelemetryService(store,relay,store.now)
         with pytest.raises(ValueError): await service._probe('alpha.example.org')
         assert visits==[]
+
+
+async def test_probe_loop_bounds_pending_tasks_and_visits_every_client(tmp_path,monkeypatch):
+    store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
+    clients=[store.redeem(store.issue(f'client-{i}',1000).code,1001) for i in range(24)]
+    store.live_proxies={c.client_id:0 for c in clients}
+    for client in clients: store.seen(client.client_id,2000)
+    relay=ClientRelay(store,store.clock)
+    service=TelemetryService(store,relay,store.clock)
+    entered,released,complete=asyncio.Event(),asyncio.Event(),asyncio.Event()
+    visits=[]
+    async def probe(domain):
+        visits.append(domain)
+        if len(visits)==8: entered.set()
+        await released.wait()
+        if len(visits)==len(clients): complete.set()
+        return 12.0
+    monkeypatch.setattr(service,'_probe',probe)
+    await service.start()
+    try:
+        await asyncio.wait_for(entered.wait(),2)
+        assert len(service.probes)<=8, 'Queued probes must not allocate one task per client'
+        released.set()
+        await asyncio.wait_for(complete.wait(),3)
+        await asyncio.sleep(0)
+        assert set(visits)=={c.domain for c in clients}
+        assert all(service.snapshot(c.client_id)['ha_available'] for c in clients)
+    finally:
+        released.set()
+        await service.close()
+
+
+async def test_probe_shutdown_cancels_blocked_workers(tmp_path,monkeypatch):
+    store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
+    clients=[store.redeem(store.issue(f'client-{i}',1000).code,1001) for i in range(16)]
+    store.live_proxies={c.client_id:0 for c in clients}
+    for client in clients: store.seen(client.client_id,2000)
+    service=TelemetryService(store,ClientRelay(store,store.clock),store.clock)
+    entered=asyncio.Event()
+    visits=[]
+    async def probe(domain):
+        visits.append(domain)
+        if len(visits)==8: entered.set()
+        await asyncio.Future()
+    monkeypatch.setattr(service,'_probe',probe)
+    await service.start()
+    try:
+        await asyncio.wait_for(entered.wait(),2)
+        workers=tuple(service.probes)
+        assert len(workers)==8 and all(not task.done() for task in workers)
+        await asyncio.wait_for(service.close(),1)
+        assert all(task.cancelled() for task in workers)
+        assert service.task.done()
+    finally:
+        await service.close()

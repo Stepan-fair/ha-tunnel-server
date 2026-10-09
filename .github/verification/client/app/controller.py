@@ -58,6 +58,14 @@ class Controller:
         self.status_received=None
         self.billing_stale=True
         self.mqtt=None
+        self.status_client=None
+        self.status_origin=None
+
+    async def close(self):
+        if self.status_client is not None:
+            await self.status_client.close()
+            self.status_client=None
+            self.status_origin=None
 
     def status(self):
         return {'state':self.state,'message':self.message,'configured':self.credentials is not None,
@@ -124,6 +132,7 @@ class Controller:
                 if any(replacement[name]!=self.credentials[name] for name in ('client_id','domain','server_url')):
                     raise ConfigProblem('Используйте новый код для этого же подключения на сервере.')
                 save_credentials(self.directory,replacement)
+                await self.close()
                 self.credentials=replacement
                 self.server_access=self.telemetry=self.status_received=None
                 if await self.launch(): self.set_state('connecting','Код заменён; подключение к серверу')
@@ -138,6 +147,7 @@ class Controller:
                 await check_http_ready(self.config_path,self.supervisor,self.pending_path)
                 replacement=await enroll(invitation)
                 save_credentials(self.directory,replacement)
+                await self.close()
                 self.credentials=replacement
                 self.server_access=self.telemetry=self.status_received=None
                 if await self.launch(): self.set_state('connecting','Новое подключение сохранено; подключаемся к серверу')
@@ -147,7 +157,11 @@ class Controller:
     async def poll_access(self):
         c=self.credentials
         self.billing_stale=True
-        result=await ClientStatusClient(c['server_url']).fetch(c['client_id'],c['secret'])
+        if self.status_origin!=c['server_url']:
+            await self.close()
+            self.status_client=ClientStatusClient(c['server_url'])
+            self.status_origin=c['server_url']
+        result=await self.status_client.fetch(c['client_id'],c['secret'])
         self.server_access=result
         self.billing_stale=False
         self.status_received=asyncio.get_running_loop().time()
@@ -188,6 +202,10 @@ class Controller:
                 except Exception:
                     self.set_state('error','Не удалось завершить настройку HTTP или запустить туннель. Проверьте HA и повторите подготовку.')
             return
+        async with self.lock:
+            await self._monitor_connection()
+
+    async def _monitor_connection(self):
         c=self.credentials
         try:
             await verify_tunnel_tls(c)

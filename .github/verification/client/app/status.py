@@ -1,6 +1,6 @@
 """TLS-verified, bounded status polling independent of tunnel permission."""
 import json
-from aiohttp import ClientSession, ClientTimeout, encode_basic_auth
+from aiohttp import ClientSession, ClientTimeout, TCPConnector, DummyCookieJar, encode_basic_auth
 from shared.validation import origin
 from shared.telemetry import parse_telemetry
 from shared.billing_status import validate_billing
@@ -28,16 +28,28 @@ async def bounded_json(response):
 
 
 class ClientStatusClient:
-    def __init__(self, server_url): self.server_url=origin(server_url)
+    def __init__(self, server_url):
+        self.server_url=origin(server_url)
+        self.session=None
+
+    async def close(self):
+        if self.session is not None:
+            await self.session.close()
+            self.session=None
 
     async def fetch(self, client_id, secret):
-        async with ClientSession(timeout=ClientTimeout(total=10), trust_env=False) as session:
-            async with session.get(self.server_url+'/health', allow_redirects=False) as response:
-                health=await bounded_json(response)
-            if not isinstance(health,dict) or health.get('protocol')!=1 or health.get('status')!='ok': raise ValueError('Invalid server health')
-            if 'capabilities' not in health: return None
-            if not isinstance(health['capabilities'],list) or 'access-v1' not in health['capabilities']: raise ValueError('Unsupported access capability')
-            async with session.post(self.server_url+'/v1/client/status', allow_redirects=False,
-                    headers={'Authorization':encode_basic_auth(client_id,secret)},
-                    json={'capabilities':['access-v1','telemetry-v1']}) as response:
-                return validate_status(await bounded_json(response),client_id)
+        if self.session is None or self.session.closed:
+            # Polling is every 15 seconds. Keep the verified connection longer
+            # than that, with a small bounded pool and no ambient cookies/auth.
+            self.session=ClientSession(timeout=ClientTimeout(total=10), trust_env=False,
+                connector=TCPConnector(limit=2,limit_per_host=2,keepalive_timeout=45),
+                cookie_jar=DummyCookieJar())
+        async with self.session.get(self.server_url+'/health', allow_redirects=False) as response:
+            health=await bounded_json(response)
+        if not isinstance(health,dict) or health.get('protocol')!=1 or health.get('status')!='ok': raise ValueError('Invalid server health')
+        if 'capabilities' not in health: return None
+        if not isinstance(health['capabilities'],list) or 'access-v1' not in health['capabilities']: raise ValueError('Unsupported access capability')
+        async with self.session.post(self.server_url+'/v1/client/status', allow_redirects=False,
+                headers={'Authorization':encode_basic_auth(client_id,secret)},
+                json={'capabilities':['access-v1','telemetry-v1']}) as response:
+            return validate_status(await bounded_json(response),client_id)

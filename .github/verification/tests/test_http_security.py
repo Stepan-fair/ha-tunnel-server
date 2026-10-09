@@ -108,3 +108,27 @@ async def test_request_size_invalid_json_and_rate_limit(setup):
         for _ in range(25):
             statuses.append((await c.post('/v1/enroll',json={'code':'bad'},headers={'X-Forwarded-Proto':'https'})).status)
         assert 429 in statuses
+
+
+async def test_token_rejects_multipart_before_creating_temporary_files(setup,monkeypatch):
+    import tempfile
+    from aiohttp import FormData, encode_basic_auth
+    s,a,o,p,plugin,admin=setup
+    now=int(time.time())
+    credentials=s.redeem(s.issue('multipart-test',now).code,now)
+    opened=[]
+    original=tempfile.TemporaryFile
+    def temporary(*args,**kwargs):
+        opened.append(True)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(tempfile,'TemporaryFile',temporary)
+    form=FormData()
+    form.add_field('grant_type','client_credentials')
+    for index in range(4): form.add_field(f'file{index}',b'',filename='test-only')
+    headers={'X-Forwarded-Proto':'https','Authorization':encode_basic_auth(credentials.client_id,credentials.secret)}
+    async with TestClient(TestServer(p(s,a,o))) as client:
+        response=await client.post('/v1/token',data=form,headers=headers)
+        assert response.status==415
+        assert opened==[], 'OAuth token endpoint must never allocate multipart files'
+        response=await client.post('/v1/token',data={'grant_type':'client_credentials'},headers=headers)
+        assert response.status==200

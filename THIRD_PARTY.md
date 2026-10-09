@@ -1,6 +1,6 @@
 # Компоненты
 
-FRP 0.71.0 — Apache-2.0, https://github.com/fatedier/frp; закреплённый source commit 4a23aa181c1d7e28eecaa8216024ed753b9d27c8 проверяется SHA256 и собирается Go1.26.8 с исправлениями Azure/go-ntlmssp0.1.1 и x/crypto0.56.0. Лицензия, go.mod/go.sum и build-info находятся в `/usr/share/doc/frp/`. Официальные release binaries Go1.25.12 больше не используются в образах.
+FRP 0.71.0 — Apache-2.0, https://github.com/fatedier/frp; закреплённый source commit 4a23aa181c1d7e28eecaa8216024ed753b9d27c8 проверяется SHA256 и собирается Go1.26.9 с исправлениями Azure/go-ntlmssp0.1.1 и x/crypto0.56.0. Лицензия, go.mod/go.sum и build-info находятся в `/usr/share/doc/frp/`. Официальные release binaries Go1.25.12 больше не используются в образах.
 
 Сохраняются лицензии Go и фактически подключённых модулей, их список — `module-notices.txt`. Сборка использует upstream тег `noweb`: встроенные страницы FRP не поставляются, административный REST API и собственная панель HA Tunnel сохраняются. Символы бинарных файлов сохраняются для точного govulncheck; его отчёты включены в образ, найденные уязвимости блокируют сборку.
 
