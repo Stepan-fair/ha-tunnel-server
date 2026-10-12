@@ -33,7 +33,7 @@ def test_restore_revoked_restarts_saved_duration(tmp_path):
     store.revoke(c.client_id)
     invite=store.reissue(c.client_id,3000)
     assert store.access_snapshot(c.client_id,3000)['revoked']
-    new=store.redeem(invite.code,3001)
+    new=store.redeem(invite.code,3001,binding=(c.client_id,c.secret))
     snap=store.access_snapshot(c.client_id,3001)
     assert new.client_id==c.client_id and snap['deadline']==3061 and not snap['paused']
     assert store.authenticate(c.client_id,c.secret) is None

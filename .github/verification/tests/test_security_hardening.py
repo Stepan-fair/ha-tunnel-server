@@ -111,7 +111,9 @@ def test_old_backup_cannot_restore_revoked_credentials_or_tokens(tmp_path):
     with restored.connection() as db:
         assert db.execute('SELECT COUNT(*) FROM access_commands').fetchone()[0]==0
     assert all(c['revoked'] for c in restored.list_clients())
-    fresh=restored.redeem(restored.reissue(creds.client_id,now).code,now)
+    current=restored.access_snapshot(creds.client_id,now)
+    fresh=restored.redeem(restored.reissue(creds.client_id,now,transfer=True,
+        confirm_domain=creds.domain,expected_revision=current['revision']).code,now)
     assert restored.authenticate(fresh.client_id,fresh.secret)
     assert restored.authenticate(creds.client_id,creds.secret) is None
 

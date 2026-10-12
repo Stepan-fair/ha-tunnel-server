@@ -74,7 +74,9 @@ def test_paid_manual_pause_restore_reenroll_never_spends_again(tmp_path):
     store.apply_access(creds.client_id,'pause','pause',snap['revision'],now[0])
     target=tmp_path/'target';restore_state(package(store),PASSWORD,target,'example.org','tunnel.example.org')
     restored=Store(target/'state.db','example.org',clock=lambda:now[0])
-    restored.redeem(restored.reissue(creds.client_id,int(now[0])).code,int(now[0]))
+    current=restored.access_snapshot(creds.client_id,now[0])
+    restored.redeem(restored.reissue(creds.client_id,int(now[0]),transfer=True,
+        confirm_domain=creds.domain,expected_revision=current['revision']).code,int(now[0]))
     after=restored.access_snapshot(creds.client_id,now[0])
     assert after['paused'] and after['billing']['balance_kopecks']==60000
     assert len(operations(restored,'purchase'))==1

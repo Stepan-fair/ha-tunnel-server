@@ -23,7 +23,7 @@ def test_reissue_keeps_old_access_until_redeemed(tmp_path):
     store.add_traffic(creds.client_id, 17, 29)
     invite = store.reissue(creds.client_id, 2000)
     assert store.authenticate(creds.client_id, creds.secret)
-    newer = store.redeem(invite.code, 2001)
+    newer = store.redeem(invite.code, 2001, binding=(creds.client_id, creds.secret))
     assert newer.client_id == creds.client_id and newer.domain == creds.domain
     assert store.authenticate(creds.client_id, creds.secret) is None
     assert store.status_authenticate(creds.client_id, creds.secret) is None

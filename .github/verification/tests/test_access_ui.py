@@ -4,7 +4,7 @@ from pathlib import Path
 def test_server_controls_labels_and_safe_rendering():
     js=Path('server/app/templates/app.js').read_text(encoding='utf-8')
     html=Path('server/app/templates/index.html').read_text(encoding='utf-8')
-    for label in ('Пуск','Пауза','Показать код','Выдать новый код','Сохранить и запустить','Бессрочно'):
+    for label in ('Пуск','Пауза','Показать код','Новый код для этого Client','Перенести на другой Home Assistant','Сохранить и запустить','Бессрочно'):
         assert label in js+html
     assert 'innerHTML' not in js
     for unit in ('years','months','weeks','days','hours','minutes'): assert unit in js

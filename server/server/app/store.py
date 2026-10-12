@@ -23,8 +23,22 @@ class ConflictError(ValueError):
         self.client_id = client_id
 
 
+class BoundDomainError(ConflictError):
+    """A replacement invitation is not proof of the existing binding."""
+    def __init__(self, message, *, client_id=None, reason='domain_bound'):
+        super().__init__(message, client_id=client_id)
+        self.reason = reason
+
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode('ascii')).hexdigest()
+
+
+def _has_binding(db, row):
+    # Routing generations and traffic timestamps also exist before enrollment.
+    # Ownership is retained explicitly when migration clears the credentials.
+    marker=db.execute('SELECT value FROM server_metadata WHERE name=?', ('binding_claimed:'+row['id'],)).fetchone()
+    return bool(row['revoked'] or row['secret_hash'] or row['status_secret_hash'] or marker)
 
 
 class Store:
@@ -50,6 +64,10 @@ class Store:
               issued INTEGER NOT NULL, expires INTEGER NOT NULL, secret_hash TEXT,
               revoked INTEGER NOT NULL DEFAULT 0, last_seen INTEGER)''')
             migrate(db)
+            db.execute('''INSERT OR IGNORE INTO server_metadata(name,value)
+                SELECT 'binding_claimed:' || c.id,'true' FROM clients c
+                WHERE c.secret_hash IS NOT NULL OR c.status_secret_hash IS NOT NULL OR c.revoked=1
+                   OR EXISTS (SELECT 1 FROM audit_events a WHERE a.client_id=c.id AND a.action IN ('redeem','transfer'))''')
             for row in db.execute('SELECT domain FROM clients WHERE revoked=0'):
                 if row['domain'].split('.')[0] in self.reserved:
                     raise ValueError('Existing client conflicts with a reserved server name')
@@ -72,21 +90,37 @@ class Store:
             if not hmac.compare_digest(digest(code), row['code_hash']):
                 raise ValueError('Invalid invitation state')
             append_event(db, action='show_code', actor=actor, client_id=client_id, domain=row['domain'], at=now)
-            return Enrollment(client_id, row['domain'], code, row['expires'])
+            purpose = 'transfer' if self._transfer_code(db, row) else 'rebind' if _has_binding(db,row) else 'connect'
+            return Enrollment(client_id, row['domain'], code, row['expires'], purpose)
 
-    def reissue(self, client_id, now, *, actor=None):
+    def _transfer_code(self, db, row):
+        entry = db.execute('SELECT value FROM server_metadata WHERE name=?', ('invitation_transfer:'+row['id'],)).fetchone()
+        if entry is None: return False
+        value = json.loads(entry['value'])
+        return value == {'code_hash': row['code_hash'], 'generation': row['generation']}
+
+    def reissue(self, client_id, now, *, actor=None, transfer=False, expected_revision=None, confirm_domain=None):
         if self.migrating: raise ConflictError('Domain migration is in progress')
+        if type(transfer) is not bool: raise ValueError('Invalid invitation purpose')
         code = secrets.token_urlsafe(32)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM clients WHERE id=?', (client_id,)).fetchone()
             if row is None:
                 raise ValueError('Unknown client')
+            if transfer:
+                if confirm_domain != row['domain']: raise ValueError('Confirm the exact domain')
+                if type(expected_revision) is not int or expected_revision != row['revision']:
+                    raise ConflictError('Подключение изменилось. Обновите данные перед переносом.')
             cipher = self._vault(db).seal(client_id, code)
             db.execute('UPDATE clients SET code_hash=?,code_ciphertext=?,issued=?,expires=? WHERE id=?',
                        (digest(code), cipher, now, now+900, client_id))
-            append_event(db, action='reissue', actor=actor, client_id=client_id, domain=row['domain'], at=now)
-        return Enrollment(client_id, row['domain'], code, now+900)
+            name = 'invitation_transfer:'+client_id
+            db.execute('DELETE FROM server_metadata WHERE name=?', (name,))
+            if transfer:
+                db.execute('INSERT INTO server_metadata VALUES (?,?)', (name, json.dumps({'code_hash': digest(code), 'generation': row['generation']})))
+            append_event(db, action='transfer_code' if transfer else 'reissue', actor=actor, client_id=client_id, domain=row['domain'], at=now)
+        return Enrollment(client_id, row['domain'], code, now+900, 'transfer' if transfer else 'rebind')
 
     def _snapshot(self, row, now):
         from server.app.subscription import billing_snapshot
@@ -226,6 +260,8 @@ class Store:
             db.execute('DELETE FROM billing_commands WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM availability_checkpoint WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM clients WHERE id=?',(client_id,))
+            db.execute('DELETE FROM server_metadata WHERE name=?', ('invitation_transfer:'+client_id,))
+            db.execute('DELETE FROM server_metadata WHERE name=?', ('binding_claimed:'+client_id,))
             for name in ('ha_available','frp_connected'):
                 db.execute('DELETE FROM server_metadata WHERE name=?',('audit:'+name+':'+client_id,))
         for cache in (self.live_proxies,self.live_sessions,self.login_sessions): cache.pop(client_id,None)
@@ -271,7 +307,7 @@ class Store:
             raise ValueError('Name is already assigned') from exc
         return Enrollment(identifier, fqdn, code, now + 900)
 
-    def redeem(self, code: str, now: int, expected_client_id=None, *, actor=None) -> Credentials:
+    def redeem(self, code: str, now: int, expected_client_id=None, *, actor=None, binding=None) -> Credentials:
         if self.migrating: raise ConflictError('Domain migration is in progress')
         validation.token(code)
         with self.connection() as db:
@@ -280,18 +316,29 @@ class Store:
             if row is None or not row['issued'] <= now < row['expires']:
                 raise ValueError('Invalid or expired connection code')
             if expected_client_id is not None and row['id'] != expected_client_id:
-                raise ValueError('Connection code belongs to a different client')
+                raise BoundDomainError('Код относится к другому подключению.', client_id=row['id'], reason='wrong_connection')
+            bound = _has_binding(db,row)
+            transfer = self._transfer_code(db, row)
+            if bound and not transfer:
+                owner = (isinstance(binding, tuple) and len(binding) == 2 and
+                         binding[0] == row['id'] and isinstance(binding[1], str) and
+                         row['status_secret_hash'] is not None and
+                         hmac.compare_digest(row['status_secret_hash'], digest(validation.token(binding[1]))))
+                if not owner:
+                    raise BoundDomainError('Домен уже привязан к другому Home Assistant.', client_id=row['id'])
             secret = secrets.token_urlsafe(32)
-            rebind = int(bool(row['revoked']) or row['status_secret_hash'] is not None)
-            if row['revoked'] and row['billing_mode']!='monthly':
+            rebind = int(bound or transfer)
+            if row['revoked'] and row['billing_mode']!='monthly' and not transfer:
                 deadline=deadline_at(datetime.fromtimestamp(now,utc_timezone.utc),parse_duration(json.loads(row['duration'])),row['timezone']).timestamp() if row['duration'] else None
                 db.execute('UPDATE clients SET paused=0,deadline=? WHERE id=?',(deadline,row['id']))
             db.execute('UPDATE clients SET code_hash=NULL,code_ciphertext=NULL,secret_hash=?,status_secret_hash=?,revoked=0,generation=generation+?,revision=revision+?,traffic_started_at=COALESCE(traffic_started_at,?) WHERE id=?',
                        (digest(secret), digest(secret), rebind, rebind, now, row['id']))
             updated=db.execute('SELECT * FROM clients WHERE id=?',(row['id'],)).fetchone()
-            self.reconcile_billing(db,updated,now)
+            if not transfer: self.reconcile_billing(db,updated,now)
+            db.execute('DELETE FROM server_metadata WHERE name=?', ('invitation_transfer:'+row['id'],))
+            db.execute('INSERT OR REPLACE INTO server_metadata VALUES (?,?)', ('binding_claimed:'+row['id'],'true'))
             result = Credentials(row['id'], row['domain'], secret)
-            append_event(db, action='redeem', actor=actor or Actor('client'), client_id=row['id'], domain=row['domain'], at=now)
+            append_event(db, action='transfer' if transfer else 'redeem', actor=actor or Actor('client'), client_id=row['id'], domain=row['domain'], at=now)
         return result
 
     def authenticate(self, client_id: str, secret: str) -> Client | None:
@@ -330,6 +377,7 @@ class Store:
                                 (client_id,))
             if cursor.rowcount != 1:
                 raise ValueError('Unknown client')
+            db.execute('DELETE FROM server_metadata WHERE name=?', ('invitation_transfer:'+client_id,))
             append_event(db, action='revoke', actor=actor, client_id=client_id, domain=row['domain'], at=self.now())
 
     def seen(self, client_id: str, now: int) -> None:

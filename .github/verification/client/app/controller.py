@@ -5,7 +5,7 @@ import ssl
 from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, ClientError, ClientConnectorCertificateError
-from client.app.enrollment import enroll, load_credentials, save_credentials, read_json
+from client.app.enrollment import enroll, load_credentials, save_credentials, read_json, EnrollmentProblem
 from client.app.ha_config import ConfigProblem
 from client.app.http_config import (preview_http, configure_http, check_http_ready,
                                     finish_http_trial, HTTPConfirmationRequired)
@@ -60,6 +60,7 @@ class Controller:
         self.mqtt=None
         self.status_client=None
         self.status_origin=None
+        self.operation_error=None
 
     async def close(self):
         if self.status_client is not None:
@@ -69,6 +70,7 @@ class Controller:
 
     def status(self):
         return {'state':self.state,'message':self.message,'configured':self.credentials is not None,
+                'operation_error':self.operation_error,
                 'domain':self.credentials['domain'] if self.credentials else None,
                 'busy':self.lock.locked(),'access':self.server_access,
                 'billing_stale':self.billing_stale or self.status_received is None or asyncio.get_running_loop().time()-self.status_received>45,
@@ -125,10 +127,11 @@ class Controller:
 
     async def rebind(self, invitation):
         async with self.lock:
+            self.operation_error=None
             try:
                 if not self.credentials: raise ConfigProblem('Сначала подключите Client.')
                 await check_http_ready(self.config_path,self.supervisor,self.pending_path)
-                replacement=await enroll(invitation,expected_client_id=self.credentials['client_id'],expected_server_url=self.credentials['server_url'])
+                replacement=await enroll(invitation,expected_client_id=self.credentials['client_id'],expected_server_url=self.credentials['server_url'],binding_secret=self.credentials['secret'])
                 if any(replacement[name]!=self.credentials[name] for name in ('client_id','domain','server_url')):
                     raise ConfigProblem('Используйте новый код для этого же подключения на сервере.')
                 save_credentials(self.directory,replacement)
@@ -136,11 +139,15 @@ class Controller:
                 self.credentials=replacement
                 self.server_access=self.telemetry=self.status_received=None
                 if await self.launch(): self.set_state('connecting','Код заменён; подключение к серверу')
-            except ConfigProblem as exc: self.set_state('error',str(exc))
+            except EnrollmentProblem as exc: self.operation_error=str(exc)
+            except ConfigProblem as exc:
+                self.operation_error=str(exc)
+                if not self.runtime.status()['running']: self.set_state('error',str(exc))
             except Exception: self.set_state('offline','Замена кода не завершена. Проверьте код и связь с сервером.')
 
     async def replace_connection(self, invitation, *, confirmed):
         async with self.lock:
+            self.operation_error=None
             try:
                 if confirmed is not True: raise ConfigProblem('Подтвердите замену текущего подключения.')
                 if not invitation: raise ConfigProblem('Введите новый код подключения.')
@@ -151,7 +158,10 @@ class Controller:
                 self.credentials=replacement
                 self.server_access=self.telemetry=self.status_received=None
                 if await self.launch(): self.set_state('connecting','Новое подключение сохранено; подключаемся к серверу')
-            except ConfigProblem as exc: self.set_state('error',str(exc))
+            except EnrollmentProblem as exc: self.operation_error=str(exc)
+            except ConfigProblem as exc:
+                self.operation_error=str(exc)
+                if not self.runtime.status()['running']: self.set_state('error',str(exc))
             except Exception: self.set_state('offline','Подключение не заменено или ещё не установлено. Проверьте код и связь с сервером.')
 
     async def poll_access(self):

@@ -27,7 +27,7 @@ async def test_paused_status_allowed_token_denied(tmp_path):
         assert (await client.post('/v1/token', headers=headers, auth=auth, data={'grant_type': 'client_credentials'})).status == 200
         store.revoke(c.client_id)
         assert (await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': []})).status == 200
-        replacement = store.redeem(store.reissue(c.client_id, now).code, now)
+        replacement = store.redeem(store.reissue(c.client_id, now).code, now, binding=(c.client_id,c.secret))
         assert (await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': []})).status == 401
 
 
@@ -38,7 +38,7 @@ def test_rebind_invalidates_old_generation(tmp_path):
     c = store.redeem(store.issue('alpha', now).code, now)
     old = authority.issue(c.client_id, generation=0)
     legacy = authority.issue(c.client_id)
-    store.redeem(store.reissue(c.client_id, now).code, now)
+    store.redeem(store.reissue(c.client_id, now).code, now, binding=(c.client_id,c.secret))
     for token in (old, legacy):
         assert authorize('Login', {'user': c.client_id, 'privilege_key': token}, store, authority)['reject']
         for op in ('Ping', 'NewWorkConn'):

@@ -38,7 +38,7 @@ def test_pending_redeem_purchases_atomically_once(tmp_path):
     command(repo,invite.client_id,'topup',30000,now[0])
     c=store.redeem(invite.code,int(now[0]))
     assert len([r for r in operations(store,'purchase') if r['client_id']==c.client_id])==1
-    store.redeem(store.reissue(c.client_id,int(now[0])).code,int(now[0]))
+    store.redeem(store.reissue(c.client_id,int(now[0])).code,int(now[0]),binding=(c.client_id,c.secret))
     assert len([r for r in operations(store,'purchase') if r['client_id']==c.client_id])==1
 
 async def test_start_buys_new_period_manual_pause_preserved_on_reenroll(tmp_path):
@@ -46,7 +46,7 @@ async def test_start_buys_new_period_manual_pause_preserved_on_reenroll(tmp_path
     clock=Clock(now[0]); store.clock=clock; service=AccessService(store,Relay(),clock)
     pause=await service.command(creds.client_id,'pause','pause',snap['revision'])
     store.revoke(creds.client_id)
-    store.redeem(store.reissue(creds.client_id,int(now[0])).code,int(now[0]))
+    store.redeem(store.reissue(creds.client_id,int(now[0])).code,int(now[0]),binding=(creds.client_id,creds.secret))
     assert store.access_snapshot(creds.client_id,clock.value)['paused']
     clock.value=stamp(2026,12,20,10)
     rev=store.access_snapshot(creds.client_id,clock.value)['revision']

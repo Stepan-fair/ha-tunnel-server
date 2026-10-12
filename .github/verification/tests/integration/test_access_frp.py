@@ -38,7 +38,7 @@ async def test_real_pause_survivor_resume_and_rebind_generation(environment):
             await wait_http(session,url,a[0].domain,'alpha')
             # Replace credentials in the existing FRP config. Generation1 can only publish
             # if real frps carries the normalized Login metadata into NewProxy.
-            newer=await access.redeem(store.reissue(a[0].client_id,int(time.time())).code)
+            newer=await access.redeem(store.reissue(a[0].client_id,int(time.time())).code,binding=(a[0].client_id,a[0].secret))
             config=a[2]
             config['auth']['oidc']['clientSecret']=newer.secret
             await a[1].stop(); await a[1].start(config)
@@ -70,7 +70,7 @@ async def test_rebind_never_routes_through_old_preopened_pool(environment):
         wa=await session.ws_connect(url+'/ws',headers={'Host':a[0].domain})
         wb=await session.ws_connect(url+'/ws',headers={'Host':b[0].domain})
         try:
-            newer=await access.redeem(store.reissue(a[0].client_id,int(time.time())).code)
+            newer=await access.redeem(store.reissue(a[0].client_id,int(time.time())).code,binding=(a[0].client_id,a[0].secret))
             assert (await wa.receive(timeout=3)).type in (WSMsgType.CLOSE,WSMsgType.CLOSED,WSMsgType.ERROR)
             # The old frpc and its valid cached JWT/pool remain running here.
             async with session.get(url,headers={'Host':newer.domain}) as response:

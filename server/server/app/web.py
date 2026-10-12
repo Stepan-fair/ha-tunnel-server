@@ -10,7 +10,7 @@ from aiohttp import web
 from shared.http import Limits, safe_errors, ingress_middleware, csrf_for
 from shared.protocol import Invitation
 from server.app.policy import authorize
-from server.app.store import ConflictError
+from server.app.store import ConflictError, BoundDomainError
 from server.app.duration import parse_duration,deadline_at
 from datetime import datetime,timezone,timedelta,date
 from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
@@ -88,7 +88,14 @@ def make_public_app(store, authority, options, access=None, telemetry=None):
             raise ValueError()
         expected=data.get('expected_client_id')
         if 'expected_client_id' in data and (not isinstance(expected,str) or len(expected)!=32): raise ValueError()
-        c=await access.redeem(data['code'],expected) if access else store.redeem(data['code'],int(store.now()),expected)
+        binding=None
+        if request.headers.get('Authorization'):
+            try: binding=basic_credentials(request)
+            except web.HTTPUnauthorized: pass
+        try:
+            c=await access.redeem(data['code'],expected,binding=binding) if access else store.redeem(data['code'],int(store.now()),expected,binding=binding)
+        except BoundDomainError as error:
+            return web.json_response({'error':error.reason},status=409)
         return web.json_response({**asdict(c),'server_url':options['server_url'],
             'tunnel_host':options['tunnel_host'],'tunnel_port':options['tunnel_port'],
             'ca_pem':options['ca_pem'],'protocol':1})
@@ -301,11 +308,20 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
 
     async def invitation(request):
         data=await request.json()
-        if data!={}: raise ValueError()
-        fn=store.reissue if request.match_info['operation']=='reissue' else store.show_code
-        invite=fn(request.match_info['client_id'],int(store.now()),actor=actor(request))
+        operation=request.match_info['operation']
+        if operation=='transfer':
+            if not isinstance(data,dict) or set(data)!={'revision','confirm_domain'}: raise ValueError()
+            try:
+                invite=store.reissue(request.match_info['client_id'],int(store.now()),actor=actor(request),
+                    transfer=True,expected_revision=data['revision'],confirm_domain=data['confirm_domain'])
+            except ConflictError:
+                return web.json_response({'error':'stale_connection','message':'Подключение изменилось. Обновите данные перед переносом.'},status=409)
+        else:
+            if data!={}: raise ValueError()
+            fn=store.reissue if operation=='reissue' else store.show_code
+            invite=fn(request.match_info['client_id'],int(store.now()),actor=actor(request))
         return web.json_response({'client_id':invite.client_id,'domain':invite.domain,'expires':invite.expires,
-            'invitation':Invitation(options['server_url'],invite.code).encode()})
+            'invitation':Invitation(options['server_url'],invite.code).encode(),'purpose':invite.purpose})
     async def preview_duration(request):
         data=await request.json()
         if not isinstance(data,dict) or set(data)!={'duration','timezone'}: raise ValueError()
@@ -359,7 +375,7 @@ def make_ingress_app(store, authority, options, disconnect, backup_export=None, 
                     web.post('/api/clients/{client_id}/delete',delete),
                     web.post('/api/clients/{client_id}/access',change_access),
                     web.post('/api/clients/{client_id}/billing',change_billing),
-                    web.post('/api/clients/{client_id}/invitation/{operation:show|reissue}',invitation),
+                    web.post('/api/clients/{client_id}/invitation/{operation:show|reissue|transfer}',invitation),
                     web.post('/api/duration/preview',preview_duration),
                     web.post('/api/backup/export',export),web.post('/api/backup/restore',restore),web.get('/{name}',asset)])
     return app

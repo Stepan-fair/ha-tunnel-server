@@ -66,7 +66,7 @@ async def test_enrollment_never_follows_redirect_or_disables_tls(tmp_path):
         await secure_server.close()
     # No transport/verify=false parameter is exposed to callers.
     import inspect
-    assert set(inspect.signature(enroll).parameters)=={'invitation','expected_client_id','expected_server_url'}
+    assert set(inspect.signature(enroll).parameters)=={'invitation','expected_client_id','expected_server_url','binding_secret'}
     with pytest.raises(ValueError):
         await enroll('HT1.invalid')
 

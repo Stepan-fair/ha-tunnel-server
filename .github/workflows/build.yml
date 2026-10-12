@@ -26,6 +26,8 @@ jobs:
         run: node .github/verification/tests/command_id.test.cjs
       - name: Verify visible financial summary and polling
         run: node .github/verification/tests/billing_overview.test.cjs
+      - name: Verify exact transfer confirmation and one pending request
+        run: node .github/verification/tests/transfer_dialog.test.cjs
       - name: Build isolated Linux verification image
         run: docker build -t ha-tunnel-verification -f .github/verification/tools/Dockerfile.test .github/verification
       - name: Require real FRP Nginx and MQTT tests with no skips

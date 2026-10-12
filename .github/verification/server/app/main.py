@@ -45,7 +45,7 @@ from shared.process_output import ProcessOutput
 from shared.http import DIAGNOSTICS
 
 HEALTH_PATH=Path('/tmp/ha-tunnel-health')
-SERVER_VERSION='0.4.0'
+SERVER_VERSION='0.4.3'
 
 
 def phase(name,component='server'):

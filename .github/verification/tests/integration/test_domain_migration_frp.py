@@ -36,7 +36,9 @@ async def test_real_domain_cutover_requires_new_credentials_and_hostname(environ
         await migration.recover()
         relay.closing=False  # Simulate the fresh relay instance after app reload.
         await relay.start(port=0);new_url=f'http://127.0.0.1:{relay.port}'
-        fresh=await access.redeem(store.reissue(a[0].client_id,int(time.time())).code)
+        moved=store.access_snapshot(a[0].client_id,time.time())
+        fresh=await access.redeem(store.reissue(a[0].client_id,int(time.time()),transfer=True,
+            confirm_domain=moved['domain'],expected_revision=moved['revision']).code)
         async with session.get(new_url,headers={'Host':fresh.domain}) as response:
             assert response.status!=200,'Old authenticated pools reached migrated identity'
         newer=ensure_pki(pki.ca.parent,'tunnel.example.net')
