@@ -45,7 +45,9 @@ def export_state(directory,store,password):
         db.execute('BEGIN')
         rows=[dict(row) for row in db.execute('SELECT * FROM clients')]
         if store.migrating: raise ValueError('Wait for domain migration to complete')
-        metadata=[dict(row) for row in db.execute("SELECT * FROM server_metadata WHERE name NOT LIKE 'domain_migration%'")]
+        # Restore revokes every record; ownership markers are derived again from
+        # those revoked records. A portable copy never authorizes a pending transfer.
+        metadata=[dict(row) for row in db.execute("SELECT * FROM server_metadata WHERE name NOT LIKE 'domain_migration%' AND name NOT GLOB 'invitation_transfer:*' AND name NOT GLOB 'binding_claimed:*'")]
         commands=[dict(row) for row in db.execute('SELECT * FROM access_commands')]
         if db.execute('SELECT COUNT(*) FROM audit_events').fetchone()[0]>EXPORT_EVENT_LIMIT:
             raise BackupTooLarge('Journal exceeds portable backup limit')

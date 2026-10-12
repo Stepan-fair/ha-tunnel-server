@@ -53,7 +53,7 @@ def test_late_close_cannot_remove_new_login_in_same_generation(tmp_path):
 
 def test_rebound_proxy_uses_server_generation_route(tmp_path):
     store, a, _ = populated(tmp_path)
-    store.redeem(store.reissue(a.client_id, 2000).code, 2000)
+    store.redeem(store.reissue(a.client_id, 2000).code, 2000, binding=(a.client_id,a.secret))
     authority = Authority(tmp_path/'identity.key', 'http://127.0.0.1:19000')
     login = authorize('Login', {'user': a.client_id, 'privilege_key': authority.issue(a.client_id, generation=1)}, store, authority)
     proxy = {'user': {'user': a.client_id, 'metas': login['content']['metas']}, 'proxy_type': 'http',

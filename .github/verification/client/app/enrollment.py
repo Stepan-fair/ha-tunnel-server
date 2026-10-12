@@ -3,13 +3,18 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientSession, ClientTimeout, encode_basic_auth
 from cryptography import x509
 from shared.files import atomic_write
 from shared.protocol import Invitation
 from shared.validation import domain, origin, token
+from client.app.ha_config import ConfigProblem
 
 FIELDS={'protocol','client_id','secret','domain','server_url','tunnel_host','tunnel_port','ca_pem'}
+
+
+class EnrollmentProblem(ConfigProblem):
+    """Safe local enrollment message; the existing connection can keep running."""
 
 
 async def read_json(response):
@@ -24,7 +29,16 @@ async def read_json(response):
 async def post_json(session,url,**kwargs):
     async with session.post(url,allow_redirects=False,**kwargs) as response:
         if response.status!=200:
-            # Never show server error bodies (they can contain credentials).
+            # Map a bounded, known error code to our own text; never echo a server body.
+            if response.status in (400,409):
+                try: problem=await read_json(response)
+                except (ValueError, TypeError): problem=None
+                messages={
+                    'domain_bound':'Домен уже привязан к другому Home Assistant. Обычный код не переносит адрес. Используйте прежний Client или оформите перенос на Server.',
+                    'wrong_connection':'Код относится к другому подключению. Прежняя привязка сохранена. Проверьте выбранный домен на Server.'}
+                if isinstance(problem,dict) and problem.get('error') in messages:
+                    raise EnrollmentProblem(messages[problem['error']])
+                raise EnrollmentProblem('Код недействителен, уже использован или истёк. Получите новый код нужного подключения на Server.')
             raise ValueError('Сервер отклонил запрос. Проверьте срок действия кода и адрес сервера.')
         return await read_json(response)
 
@@ -51,14 +65,19 @@ def validate_response(data, invitation):
     return data
 
 
-async def enroll(invitation, *, expected_client_id=None, expected_server_url=None):
-    invitation=Invitation.parse(invitation)
+async def enroll(invitation, *, expected_client_id=None, expected_server_url=None, binding_secret=None):
+    try: invitation=Invitation.parse(invitation)
+    except ValueError: raise EnrollmentProblem('Некорректный код подключения. Скопируйте его целиком из панели Server.') from None
     if expected_server_url is not None and invitation.server != expected_server_url:
-        raise ValueError('Invitation belongs to a different server')
+        raise EnrollmentProblem('Код выдан другим Server. Используйте код текущего подключения или «Другое подключение».')
     payload={'code':invitation.code}
     if expected_client_id is not None: payload['expected_client_id']=expected_client_id
+    headers={}
+    if binding_secret is not None:
+        if expected_client_id is None: raise ValueError('Missing binding identity')
+        headers['Authorization']=encode_basic_auth(expected_client_id,token(binding_secret))
     async with ClientSession(timeout=ClientTimeout(total=30),trust_env=False) as session:
-        data=await post_json(session,invitation.server+'/v1/enroll',json=payload)
+        data=await post_json(session,invitation.server+'/v1/enroll',json=payload,headers=headers)
     return validate_response(data,invitation)
 
 

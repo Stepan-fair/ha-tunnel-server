@@ -19,9 +19,9 @@ class AccessService:
             await self.relay.disconnect(client_id)
         return result
 
-    async def redeem(self, code, expected_client_id=None):
+    async def redeem(self, code, expected_client_id=None, *, binding=None):
         # Redemption cannot await between the transactional generation change and closing old sessions.
-        result = self.store.redeem(code, int(self.now()), expected_client_id=expected_client_id)
+        result = self.store.redeem(code, int(self.now()), expected_client_id=expected_client_id, binding=binding)
         await self.relay.disconnect(result.client_id)
         return result
 

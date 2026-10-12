@@ -94,7 +94,7 @@ async def test_rebind_same_client_preserves_http_configuration(tmp_path,monkeypa
     ctrl.launch=AsyncMock(return_value=True)
     await ctrl.rebind('replacement-invitation')
     assert ctrl.credentials==replacement
-    module.enroll.assert_awaited_once_with('replacement-invitation',expected_client_id=original['client_id'],expected_server_url=original['server_url'])
+    module.enroll.assert_awaited_once_with('replacement-invitation',expected_client_id=original['client_id'],expected_server_url=original['server_url'],binding_secret=original['secret'])
     ctrl.supervisor.restart_core.assert_not_awaited()
 
 

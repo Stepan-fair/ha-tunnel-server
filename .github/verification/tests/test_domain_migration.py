@@ -48,8 +48,28 @@ async def test_move_preserves_finance_and_manual_pause_invalidates_credentials(t
     assert not reopened.authenticate(creds.client_id,creds.secret)
     assert not reopened.status_authenticate(creds.client_id,creds.secret)
     with pytest.raises(ValueError):reopened.redeem(old.code,int(now[0]))
-    reopened.redeem(reopened.reissue(creds.client_id,int(now[0])).code,int(now[0]))
+    ordinary=reopened.reissue(creds.client_id,int(now[0]))
+    before=reopened.list_clients()
+    with pytest.raises(ConflictError):reopened.redeem(ordinary.code,int(now[0]))
+    assert reopened.list_clients()==before
+    reopened.redeem(reopened.reissue(creds.client_id,int(now[0]),transfer=True,
+        confirm_domain=moved['domain'],expected_revision=moved['revision']).code,int(now[0]))
+    transferred=reopened.access_snapshot(creds.client_id,now[0])
+    assert transferred['generation']>moved['generation']
+    assert transferred['revision']>moved['revision']
     assert len(operations(reopened,'purchase'))==1
+
+
+async def test_upgrade_recovers_ownership_after_old_release_domain_migration(tmp_path):
+    store,creds,repo,now,snap,setup,migration,draft=context(tmp_path)
+    preview=await migration.preview(draft)
+    await migration.apply(draft,'old-release-move',preview['revision'])
+    # 0.4.2 had enrollment history, but no ownership metadata marker.
+    with store.connection() as db:
+        db.execute("DELETE FROM server_metadata WHERE name GLOB 'binding_claimed:*'")
+    reopened=Store(store.path,'example.net',clock=lambda:now[0])
+    invite=reopened.reissue(creds.client_id,int(now[0]))
+    with pytest.raises(ConflictError): reopened.redeem(invite.code,int(now[0]))
 
 async def test_revoked_remains_revoked_and_collision_or_stale_cannot_write(tmp_path):
     store,creds,repo,now,snap,setup,migration,draft=context(tmp_path)

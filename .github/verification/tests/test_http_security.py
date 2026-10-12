@@ -67,9 +67,11 @@ async def test_rebind_wrong_identity_does_not_consume_invitation(setup):
     async with TestClient(TestServer(p(s,a,o))) as client:
         headers={'X-Forwarded-Proto':'https'}
         response=await client.post('/v1/enroll',headers=headers,json={'code':invite.code,'expected_client_id':alpha.client_id})
-        assert response.status==400
+        assert response.status==409
         assert s.list_clients()==before
         assert s.authenticate(bravo.client_id,bravo.secret)
+        from aiohttp import encode_basic_auth
+        headers['Authorization']=encode_basic_auth(bravo.client_id,bravo.secret)
         response=await client.post('/v1/enroll',headers=headers,json={'code':invite.code,'expected_client_id':bravo.client_id})
         assert response.status==200
         assert (await response.json())['client_id']==bravo.client_id

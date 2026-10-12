@@ -47,3 +47,4 @@ class Enrollment:
     domain: str
     code: str = field(repr=False)
     expires: int = 0
+    purpose: str = 'connect'

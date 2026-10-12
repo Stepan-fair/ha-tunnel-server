@@ -24,7 +24,7 @@ async def test_revoked_client_can_rebind_without_core_restart(tmp_path,monkeypat
     ctrl,old=controller(tmp_path)
     async def ready(*args): pass
     async def enroll(code,**expected):
-        assert expected=={'expected_client_id':old['client_id'],'expected_server_url':old['server_url']}
+        assert expected=={'expected_client_id':old['client_id'],'expected_server_url':old['server_url'],'binding_secret':old['secret']}
         return {**old,'secret':'z'*43}
     async def launch(**kwargs): return True
     monkeypatch.setattr(module,'check_http_ready',ready)
