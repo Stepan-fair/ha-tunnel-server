@@ -75,7 +75,7 @@ async def transfer_code(setup, *, revision=None, domain=None):
         current = store.access_snapshot(original.client_id, now)
         response = await client.post('/api/clients/'+original.client_id+'/invitation/transfer',
             headers=headers, json={'revision': current['revision'] if revision is None else revision,
-                                   'confirm_domain': original.domain if domain is None else domain})
+                                   'command_id':'transfer-test','confirm_domain': original.domain if domain is None else domain})
         return response.status, await response.json()
 
 
@@ -120,7 +120,7 @@ async def test_ordinary_reissue_cancels_transfer_authorization(setup):
     store, authority, options, now, original, invitation = setup
     status, result = await transfer_code(setup)
     assert status == 200
-    ordinary = store.reissue(original.client_id, now)
+    ordinary = store.reissue(original.client_id, now, replace_pending=True)
     async with TestClient(TestServer(make_public_app(store, authority, options))) as client:
         response = await client.post('/v1/enroll', json={'code': ordinary.code},
                                      headers={'X-Forwarded-Proto': 'https'})

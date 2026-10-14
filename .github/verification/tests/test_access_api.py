@@ -48,7 +48,7 @@ def test_rebind_invalidates_old_generation(tmp_path):
     assert not login['reject'] and login['content']['metas']['ha_tunnel_generation'] == '1'
     content = {'user': {'user': c.client_id, 'metas': {'ha_tunnel_generation': '0'}}, 'proxy_type': 'http', 'proxy_name': c.client_id+'.ha', 'custom_domains': [c.domain]}
     assert authorize('NewProxy', content, store, authority)['reject']
-    content['user']['metas'] = login['content']['metas']
+    content['user'] = {k:login['content'][k] for k in ('user','run_id','metas')}
     assert not authorize('NewProxy', content, store, authority)['reject']
 
 

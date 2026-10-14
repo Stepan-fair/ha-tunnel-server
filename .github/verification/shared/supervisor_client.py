@@ -11,7 +11,7 @@ class SupervisorClient:
     async def post(self,path,payload): return await self._request('POST',path,payload)
 
     async def _request(self,method,path,payload=None):
-        allowed=(path in ('/addons/self/info','/supervisor/info','/addons') or
+        allowed=(path in ('/addons/self/info','/supervisor/info','/addons','/host/info') or
                  re.fullmatch(r'/addons/[a-z0-9_]+/info',path)) if method=='GET' else path=='/addons/self/options'
         if not allowed or not self.token: raise ValueError('Supervisor endpoint unavailable')
         try:

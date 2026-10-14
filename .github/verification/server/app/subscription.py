@@ -142,7 +142,7 @@ def billing_snapshot(row, now, *, reliable=True):
         'manual' if row['paused'] else 'clock_error' if not reliable and price>0 else
         'insufficient_funds' if mode=='monthly' and price>0 and (period is None or not period.start<=now<period.end) else None)
     projection=Projection(None,'legacy') if mode=='legacy' else forecast(period,balance,price,now,row['billing_timezone'])
-    if reason in ('revoked','pending') and price>0: projection=Projection(None,'unavailable')
+    if (not reliable or reason in ('revoked','pending')) and price>0: projection=Projection(None,'unavailable')
     return dict(mode=mode,price_kopecks=price,balance_kopecks=balance,
         paid_from=row['paid_from'],paid_until=row['paid_until'],funds_until=projection.until,
         projection_kind=projection.kind,projection_limited=projection.limited,

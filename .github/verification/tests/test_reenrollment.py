@@ -64,7 +64,7 @@ def test_backup_preserves_history_but_invalidates_authorization(tmp_path):
     store.add_traffic(credentials.client_id, 100, 200)
     invite = store.reissue(credentials.client_id, now)
     blob = export_state(source, store, 'a strong test password')
-    assert blob.startswith(b'HATB3')
+    assert blob.startswith(b'HATB5')
     restore_state(blob, 'a strong test password', dest, 'example.org', 'tunnel.example.org')
     restored = Store(dest/'state.db', 'example.org')
     previous=store.access_snapshot(credentials.client_id,now)

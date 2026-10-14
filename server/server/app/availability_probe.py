@@ -14,14 +14,19 @@ class NpmResolver(AbstractResolver):
     async def close(self): pass
 
 class ServiceProbe:
-    def __init__(self,runtime,gateway,server_url,addresses,diagnostics=None):
+    def __init__(self,runtime,gateway,server_url,addresses,diagnostics=None,*,generation=None):
         self.runtime,self.gateway=runtime,gateway
         self.url=server_url.rstrip('/')+'/health'
         self.host=urlsplit(server_url).hostname
-        self.addresses=addresses
+        self.address_source=addresses
+        self.generation=generation or (lambda:0)
         self.diagnostics=diagnostics
         self.last=None
         self.at=0
+
+    @property
+    def addresses(self):
+        return tuple(self.address_source() if callable(self.address_source) else self.address_source)
 
     async def __call__(self):
         result=dict(frp=bool(self.runtime.status()['running']),gateway=self.gateway.returncode is None,npm=False)
@@ -32,8 +37,16 @@ class ServiceProbe:
                 await writer.wait_closed()
             except (OSError,TimeoutError): result['frp']=False
         # Every checkpoint verifies local processes. HTTPS is cached for at most 5s.
-        if self.last is None or time.monotonic()-self.at>=5:
-            connector=TCPConnector(resolver=NpmResolver(self.host,self.addresses))
+        addresses=self.addresses
+        generation=self.generation()
+        if addresses!=getattr(self,'last_addresses',None) or generation!=getattr(self,'last_generation',None):
+            self.last=None
+            self.last_addresses=addresses
+            self.last_generation=generation
+        if not addresses:
+            self.last=False
+        elif self.last is None or time.monotonic()-self.at>=5:
+            connector=TCPConnector(resolver=NpmResolver(self.host,addresses))
             try:
                 async with ClientSession(connector=connector,timeout=ClientTimeout(total=2),trust_env=False,auto_decompress=False) as session:
                     async with session.get(self.url,allow_redirects=False) as response:
@@ -44,13 +57,15 @@ class ServiceProbe:
             except (ClientError,OSError,TimeoutError,ValueError,AttributeError):
                 self.last=False
             self.at=time.monotonic()
-        result['npm']=self.last is True
+        # Revocation during HTTPS must not publish a cached healthy result.
+        result['npm']=self.last is True and bool(addresses) and self.addresses==addresses
         if result['gateway']:
             try:
                 async with ClientSession(timeout=ClientTimeout(total=.5),trust_env=False) as session:
                     async with session.get('http://127.0.0.1:8080/',allow_redirects=False) as response:
                         result['gateway']=response.status==403
             except (ClientError,OSError,TimeoutError): result['gateway']=False
+        result['npm']=result['npm'] and self.addresses==addresses and bool(addresses) and self.generation()==generation
         if self.diagnostics:
             for component,healthy in result.items(): self.diagnostics.component(component,'healthy' if healthy else 'unhealthy')
         return result

@@ -32,7 +32,12 @@ class BillingRepository:
             'paid_until':row['paid_until'],'days':days})
 
     def _reconcile(self,db,row,now,timezone,*,actor=None,fresh_start=False):
-        if self.store.migrating: return row
+        if self.store.migrating or not getattr(self.store.clock,'reliable',True): return row
+        if db.execute('SELECT 1 FROM server_metadata WHERE name=?',('clock_hold:'+row['id'],)).fetchone(): return row
+        if row['paid_from'] is not None and row['paid_from']>now:
+            db.execute('INSERT OR REPLACE INTO server_metadata VALUES (?,?)',('clock_hold:'+row['id'],'true'))
+            append_event(db,action='period_hold',at=now,actor=actor,client_id=row['id'],domain=row['domain'],details={'paid_until':row['paid_until']})
+            return row
         if row['billing_mode']=='legacy' or row['paused'] or row['revoked'] or not row['secret_hash']:
             return row
         price,balance=row['price_kopecks'],row['balance_kopecks']
@@ -76,6 +81,7 @@ class BillingRepository:
         request=json.dumps([action,expected_revision,value_kopecks,timezone],separators=(',',':'))
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.store.ensure_mutation_allowed()
             previous=db.execute('SELECT request,result FROM billing_commands WHERE client_id=? AND command_id=?',(client_id,command_id)).fetchone()
             if previous:
                 if previous['request']!=request: raise ValueError('Command identifier was reused')
@@ -104,6 +110,7 @@ class BillingRepository:
         instant(now); zone(timezone)
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.store.ensure_mutation_allowed()
             row=self._row(db,client_id)
             if not hasattr(self.store.clock,'reliable') or self.store.clock.reliable:
                 row=self._reconcile(db,row,now,timezone,actor=actor)

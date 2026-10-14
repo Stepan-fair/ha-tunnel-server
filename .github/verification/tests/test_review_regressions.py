@@ -11,8 +11,12 @@ def controller(tmp_path):
     ctrl=Controller(tmp_path/'state',config,AsyncMock(),AsyncMock())
     ctrl.supervisor.get_http_config.return_value=None
     ctrl.credentials={'domain':'home.example.org','tunnel_host':'connect.example.org',
-                      'tunnel_port':7000,'ca_pem':'test','client_id':'a'*32}
+                      'tunnel_port':7000,'ca_pem':'test','client_id':'a'*32,
+                      'server_url':'https://connect.example.org','secret':'x'*43}
     ctrl.launch=AsyncMock()
+    ctrl.status_origin=ctrl.credentials['server_url']
+    ctrl.status_client=AsyncMock()
+    ctrl.status_client.fetch.side_effect=OSError('Status API unavailable')
     return ctrl
 
 
@@ -20,7 +24,7 @@ async def test_resume_configuration_error_keeps_status_available(tmp_path):
     ctrl=controller(tmp_path)
     ctrl.config_path.write_text('http: !secret http\n')
     await ctrl.resume()
-    assert ctrl.status()['state']=='error'
+    assert ctrl.status()['state']=='configuration_error'
     assert 'вручную' in ctrl.status()['message']
     ctrl.launch.assert_not_awaited()
 
@@ -37,13 +41,17 @@ async def test_resume_slow_core_can_recover_without_edit_or_restart(tmp_path):
     assert ctrl.config_path.read_bytes()==before
 
 
-async def test_frp_certificate_failure_is_reported_without_api_call(tmp_path,monkeypatch):
+async def test_frp_certificate_failure_is_reported_after_independent_status(tmp_path,monkeypatch):
     from client.app import controller as module
     ctrl=controller(tmp_path)
     ctrl.set_state('connecting','')
+    class Status:
+        async def fetch(self,*args): return {'client_id':'a'*32,'revision':5,'generation':0,'access_state':'allowed'}
+    ctrl.status_client=Status(); ctrl.status_origin=ctrl.credentials['server_url']
     monkeypatch.setattr(module,'verify_tunnel_tls',AsyncMock(side_effect=ssl.SSLCertVerificationError('untrusted')))
     await ctrl.monitor_once()
     assert ctrl.status()['state']=='certificate_error'
+    assert ctrl.server_access['revision']==5
     ctrl.runtime.stop.assert_awaited_once()
 
 

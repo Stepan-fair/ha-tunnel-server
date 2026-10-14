@@ -16,9 +16,19 @@ from tests.test_subscription_calendar import stamp
 
 async def test_completed_migration_allows_normal_settings_and_idempotent_retry(tmp_path):
     store,creds,repo,now,snap,setup,migration,draft=context(tmp_path)
+    from tests.test_npm_dependency import Supervisor,Resolver,HOST,SLUG
+    setup.options['npm_host']=HOST; setup.supervisor.options['npm_host']=HOST; draft['npm_host']=HOST
+    original_get=setup.supervisor.get
+    async def get(path):
+        if path=='/addons/'+SLUG+'/info': return Supervisor().info
+        return await original_get(path)
+    setup.supervisor.get=get
+    setup.npm_dependency.resolve=Resolver()
     preview=await migration.preview(draft)
     result=await migration.apply(draft,'move',preview['revision'])
     current={**draft,'bandwidth_limit_mb':20,'admin_user_ids':['new-admin']}
+    async def verified_user(user): return user=='new-admin'
+    setup.admin_validator=verified_user
     await setup.save(current,setup.revision(draft))
     assert await migration.recover()
     assert setup.options==current
@@ -41,7 +51,11 @@ async def test_startup_http_cannot_purchase_before_outage_recovery(tmp_path,monk
     monkeypatch.setattr(main,'ServerRuntime',lambda *args,**kwargs:AsyncMock())
     async def admin(*args):return True
     monkeypatch.setattr(main,'verified_admin',admin)
-    setup=SimpleNamespace(detected={'timezone':'Europe/Moscow'},options={},diagnostics=None)
+    from server.app.administration import Administration
+    from server.app.setup import SetupService
+    from tests.test_npm_dependency import Supervisor
+    setup=SetupService(tmp_path,Supervisor(),administration=store.administration)
+    setup.detected={'timezone':'Europe/Moscow'}
     options=dict(base_domain='example.org',server_url='https://tunnel.example.org',admin_user_ids=['admin'],ingress_ips=['127.0.0.1'])
     responses=[]
     class StopStartup(Exception):pass
@@ -57,7 +71,7 @@ async def test_startup_http_cannot_purchase_before_outage_recovery(tmp_path,monk
         return SimpleNamespace(cleanup=AsyncMock())
     monkeypatch.setattr(main,'listen',listen)
     with pytest.raises(StopStartup):
-        await main.run_operational(options,[(None,None,None,None,('127.0.0.1',0))],setup)
+        await main.run_operational(options,setup)
     assert responses==[409]
     assert len(operations(store,'purchase'))==1
     await AvailabilityService(store,clock,probe=healthy).recover()

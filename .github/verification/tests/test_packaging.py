@@ -32,6 +32,50 @@ def test_two_self_contained_packages_without_runtime_data(tmp_path):
     assert (output/'repository.yaml').exists()
 
 
+@pytest.mark.parametrize('role',['server','client'])
+def test_canonical_notification_asset_in_standalone_role_http(tmp_path,role):
+    import os,subprocess,sys
+    from tools.package import package
+    output=tmp_path/'repository'; package(output,component=role)
+    root=output/role; asset=root/'shared/notification_settings.js'
+    assert asset.is_file(), 'Standalone package must include canonical shared notification asset'
+    assert asset.read_bytes()==Path('shared/notification_settings.js').read_bytes()
+    assert not (root/role/'app/templates/notification_settings.js').exists()
+    script='''
+import asyncio,sys,tempfile
+from pathlib import Path
+from aiohttp.test_utils import TestClient,TestServer
+async def main():
+    role=sys.argv[1]
+    options={'ingress_ips':['127.0.0.1'],'admin_user_ids':['admin']}
+    async def admin(user): return user=='admin'
+    async def disconnect(cid): pass
+    with tempfile.TemporaryDirectory() as temporary:
+        if role=='server':
+            from server.app.store import Store
+            from server.app.web import make_ingress_app
+            from server.app.setup import SetupService,make_setup_app
+            store=Store(Path(temporary)/'state.db','example.org',clock=lambda:1000000)
+            apps=[make_ingress_app(store,None,options,disconnect),
+                  make_setup_app(SetupService(Path(temporary)/'setup',object()),admin,ingress_ips=['127.0.0.1'])]
+        else:
+            from client.app.web import make_app
+            apps=[make_app(object(),options)]
+        assert Path(sys.modules[role+'.app.web'].__file__).resolve().is_relative_to(Path.cwd())
+        assert Path(sys.modules['shared.notifications'].__file__).resolve().is_relative_to(Path.cwd())
+        for app in apps:
+            async with TestClient(TestServer(app)) as client:
+                response=await client.get('/notification_settings.js',headers={'X-Remote-User-Id':'admin'})
+                assert response.status==200
+                assert await response.read()==Path('shared/notification_settings.js').read_bytes()
+                assert response.content_type=='text/javascript'
+asyncio.run(main())
+'''
+    env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
+    result=subprocess.run([sys.executable,'-c',script,role],cwd=root,env=env,capture_output=True,text=True,timeout=20)
+    assert result.returncode==0,result.stderr
+
+
 def test_gateway_trust_and_header_normalization():
     from server.app.gateway import nginx_config
     text=nginx_config(['172.30.33.5'])
@@ -68,7 +112,7 @@ def test_role_release_workflow_has_scoped_permissions(tmp_path):
     release_repository('server',output)
     yaml=YAML(typ='safe')
     workflow=yaml.load((output/'.github/workflows/build.yml').read_text())
-    assert workflow['permissions']=={'contents':'read','packages':'write'}
+    assert workflow['permissions']=={'contents':'read'}
     build=workflow['jobs']['build']
     assert build['strategy']['matrix']['arch']==['amd64']
     for step in build['steps']:
@@ -90,6 +134,16 @@ def test_release_runs_real_linux_tests_before_publication(tmp_path):
     build_step=next(s for s in workflow['jobs']['build']['steps'] if s.get('uses','').startswith('docker/build-push-action@'))
     assert build_step['with']['sbom'] is True
     assert build_step['with']['provenance']=='mode=max'
+    assert build_step['with']['push'] is False
+    assert build_step['with']['outputs']=='type=oci,dest=candidate.tar'
+    assert 'if' not in workflow['jobs']['build']
+    assert len([s for job in workflow['jobs'].values() for s in job['steps']
+                if s.get('uses','').startswith('docker/build-push-action@')]) == 1
+    node_steps = [s for s in workflow['jobs']['security-tests']['steps'] if s.get('run', '').startswith('node ')]
+    assert {s['run'].split('/')[-1] for s in node_steps} == {
+        'command_id.test.cjs', 'billing_overview.test.cjs', 'transfer_dialog.test.cjs',
+        'clock_repair_ui.test.cjs', 'dependency_status_ui.test.cjs', 'notification_settings.test.cjs'}
+    assert all(s.get('working-directory') == '.github/verification' for s in node_steps)
 
 
 def test_release_cli_is_directly_executable(tmp_path):
@@ -144,3 +198,57 @@ def test_release_gate_rejects_extra_discoverable_configs(tmp_path, config_name):
     extra.write_text('{}', encoding='utf-8')
     with pytest.raises(ValueError, match='Unexpected discoverable application configuration'):
         verify_release_context(output, 'client')
+
+
+@pytest.mark.parametrize('role', ['server', 'client'])
+def test_generated_repository_executes_candidate_gate_with_saved_record(tmp_path, role):
+    import json
+    import subprocess
+    import sys
+    from tools.release_repository import release_repository
+    from test_oci_candidate import fixture, scan_report, REVISION, VERSION
+    output = tmp_path / 'role'
+    release_repository(role, output)
+    archive, _, _, config, _, _ = fixture(tmp_path)
+    script = output / '.github/verification/tools/oci_candidate.py'
+    record = tmp_path / 'candidate.json'
+    base = [sys.executable, str(script), '--archive', str(archive), '--revision', REVISION,
+            '--version', VERSION, '--record', str(record)]
+    result = subprocess.run([*base, 'verify'], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    expected = json.loads(record.read_text())
+    scan = tmp_path / 'scan.json'
+    scan.write_text(json.dumps(scan_report(expected)))
+    inspection = tmp_path / 'inspection.json'
+    inspection.write_text(json.dumps([{'Id': config['digest'], 'RootFS': {'Layers': expected['diff_ids']}}]))
+    result = subprocess.run([*base, 'gate', '--scan', str(scan), '--inspection', str(inspection)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    scan.write_text('{}')
+    result = subprocess.run([*base, 'gate', '--scan', str(scan), '--inspection', str(inspection)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+
+
+def test_only_tag_publisher_has_package_write_and_reuses_candidate_artifacts(tmp_path):
+    from tools.release_repository import release_repository
+    output = tmp_path / 'release'
+    release_repository('server', output)
+    workflow = YAML(typ='safe').load((output/'.github/workflows/build.yml').read_text())
+    jobs = workflow['jobs']
+    assert jobs['build']['permissions'] == {'contents': 'read'}
+    assert jobs['security-tests']['permissions'] == {'contents': 'read'}
+    for name, job in jobs.items():
+        effective = job.get('permissions', workflow['permissions'])
+        if effective.get('packages') == 'write':
+            assert name == 'publish'
+            assert job['if'] == "startsWith(github.ref, 'refs/tags/v')"
+            assert job['needs'] == 'build'
+    publisher = jobs['publish']
+    assert publisher['permissions'] == {'contents': 'read', 'packages': 'write'}
+    downloads = [step['with']['name'] for step in publisher['steps']
+                 if step.get('uses', '').startswith('actions/download-artifact@')]
+    assert set(downloads) == {'server-amd64-candidate-evidence', 'server-amd64-oci-candidate'}
+    assert not any(step.get('uses', '').startswith('docker/build-push-action@') for step in publisher['steps'])
+    # The executable publish CLI already tests revalidation before any copy.
+    assert any('oci_candidate.py publish' in step.get('run', '') for step in publisher['steps'])

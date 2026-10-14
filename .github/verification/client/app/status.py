@@ -6,6 +6,10 @@ from shared.telemetry import parse_telemetry
 from shared.billing_status import validate_billing
 
 
+class CredentialsRejected(ValueError):
+    """The authenticated Server no longer accepts this binding."""
+
+
 def validate_status(data, client_id):
     if not isinstance(data, dict) or data.get('client_id') != client_id or data.get('access_state') not in ('allowed','paused','expired','revoked','clock_error','pending'):
         raise ValueError('Invalid access status')
@@ -44,12 +48,15 @@ class ClientStatusClient:
             self.session=ClientSession(timeout=ClientTimeout(total=10), trust_env=False,
                 connector=TCPConnector(limit=2,limit_per_host=2,keepalive_timeout=45),
                 cookie_jar=DummyCookieJar())
+        async with self.session.post(self.server_url+'/v1/client/status', allow_redirects=False,
+                headers={'Authorization':encode_basic_auth(client_id,secret)},
+                json={'capabilities':['access-v1','telemetry-v1']}) as response:
+            if response.status in (401,403): raise CredentialsRejected('Binding rejected')
+            if response.status not in (404,405):
+                return validate_status(await bounded_json(response),client_id)
+        # Legacy discovery is needed only when the authenticated route is absent.
         async with self.session.get(self.server_url+'/health', allow_redirects=False) as response:
             health=await bounded_json(response)
         if not isinstance(health,dict) or health.get('protocol')!=1 or health.get('status')!='ok': raise ValueError('Invalid server health')
         if 'capabilities' not in health: return None
-        if not isinstance(health['capabilities'],list) or 'access-v1' not in health['capabilities']: raise ValueError('Unsupported access capability')
-        async with self.session.post(self.server_url+'/v1/client/status', allow_redirects=False,
-                headers={'Authorization':encode_basic_auth(client_id,secret)},
-                json={'capabilities':['access-v1','telemetry-v1']}) as response:
-            return validate_status(await bounded_json(response),client_id)
+        raise ValueError('Status endpoint unavailable')

@@ -43,7 +43,7 @@ async def test_real_pause_survivor_resume_and_rebind_generation(environment):
             config['auth']['oidc']['clientSecret']=newer.secret
             await a[1].stop(); await a[1].start(config)
             await wait_http(session,url,newer.domain,'alpha')
-            assert store.live_proxies[newer.client_id]==1
+            assert store.admission.connected(newer.client_id,1)
             await wb.send_str('after replacement'); assert (await wb.receive(timeout=3)).data=='after replacement'
             snap=store.access_snapshot(newer.client_id,store.now())
             await access.command(newer.client_id,'revoke','revoke',snap['revision'])

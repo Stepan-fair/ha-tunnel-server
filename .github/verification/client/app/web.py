@@ -7,10 +7,12 @@ from shared.presentation import format_metrics,format_billing
 from shared.help import documentation
 
 
-def make_app(controller,options,admin_check=None):
+def make_app(controller,options,admin_check=None,notifications=None):
     key=secrets.token_bytes(32)
     tasks=set()
     app=web.Application(client_max_size=8192,middlewares=[safe_errors,ingress_middleware(options,key,admin_check)])
+    from shared.notifications import add_notification_routes
+    add_notification_routes(app,notifications,key)
     async def state(request):
         result=controller.status()
         result['billing_presentation']=format_billing((result.get('access') or {}).get('billing'),stale=result.get('billing_stale',True))
@@ -37,18 +39,27 @@ def make_app(controller,options,admin_check=None):
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return web.json_response({'status':'preparing'},status=202)
+    async def cancel_binding(request):
+        if await request.json()!={}: raise ValueError()
+        if tasks: raise web.HTTPConflict()
+        task=asyncio.create_task(controller.cancel_binding())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return web.json_response({'status':'checking'},status=202)
     async def index(request):
         return web.Response(body=(Path(__file__).parent/'templates/index.html').read_bytes(),content_type='text/html')
     async def help_page(request): return web.json_response({'text':documentation(__file__)})
     async def asset(request):
         name=request.match_info['name']
-        if name not in ('app.js','style.css'):
+        if name not in ('app.js','notification_settings.js','style.css'):
             raise web.HTTPNotFound()
-        return web.Response(body=(Path(__file__).parent/'templates'/name).read_bytes(),
+        from shared.notifications import notification_asset
+        body=notification_asset() if name=='notification_settings.js' else (Path(__file__).parent/'templates'/name).read_bytes()
+        return web.Response(body=body,
                             content_type='text/javascript' if name.endswith('.js') else 'text/css')
     async def cleanup(app):
         for task in tuple(tasks): task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
     app.on_cleanup.append(cleanup)
-    app.add_routes([web.get('/',index),web.get('/api/help',help_page),web.get('/api/state',state),web.post('/api/connect',connect),web.post('/api/rebind',connect),web.post('/api/replace-connection',connect),web.get('/{name}',asset)])
+    app.add_routes([web.get('/',index),web.get('/api/help',help_page),web.get('/api/state',state),web.post('/api/binding/cancel',cancel_binding),web.post('/api/connect',connect),web.post('/api/rebind',connect),web.post('/api/replace-connection',connect),web.get('/{name}',asset)])
     return app

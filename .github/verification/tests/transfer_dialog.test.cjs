@@ -18,7 +18,7 @@ const requests = [], shown = [];
 let complete;
 const pending = new Promise(resolve => { complete = resolve; });
 const context = vm.createContext({
-  byId: id => nodes[id], encodeURIComponent,
+  byId: id => nodes[id], encodeURIComponent, commandId:()=>"stable-command", confirm:()=>true,
   api: async (url, data) => { requests.push({url, data}); await pending; return {json: async () => ({invitation: 'synthetic-code'})}; },
   showCode: result => shown.push(result)
 });
@@ -42,6 +42,8 @@ vm.runInContext(source.slice(start, end), context);
   assert.equal(shown.length, 1);
   assert.equal(shown[0].invitation, 'synthetic-code');
   assert.equal(nodes['transfer-dialog'].open, false);
-  assert.deepEqual(JSON.parse(JSON.stringify(requests[0])), {url:'api/clients/alpha-id/invitation/transfer',data:{revision:7,confirm_domain:'alpha.example.org'}});
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0])), {url:'api/clients/alpha-id/invitation/transfer',data:{revision:7,confirm_domain:'alpha.example.org',command_id:'stable-command',replace_pending:false}});
+  vm.runInContext("openTransfer({id:'alpha-id',domain:'alpha.example.org',revision:8,pending_transfer:true})",context);
+  assert.match(nodes['transfer-description'].textContent,/замен/);
   console.log('PASS: exact domain confirmation and one pending transfer request');
 })().catch(error => { console.error(error); process.exitCode = 1; });

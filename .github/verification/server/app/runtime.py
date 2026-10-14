@@ -5,7 +5,7 @@ def server_config(pki, port=7000, http_port=18080, plugin_port=19000, bind='0.0.
     return {
         'bindAddr':bind,'bindPort':port,'proxyBindAddr':'127.0.0.1',
         'vhostHTTPPort':http_port,'maxPortsPerClient':1,'userConnTimeout':10,
-        'transport':{'maxPoolCount':5,'tls':{'force':True,'certFile':str(pki.cert),'keyFile':str(pki.key)}},
+        'transport':{'maxPoolCount':1,'tls':{'force':True,'certFile':str(pki.cert),'keyFile':str(pki.key)}},
         'auth':{'method':'oidc','additionalScopes':['HeartBeats','NewWorkConns'],
                 'oidc':{'issuer':f'http://127.0.0.1:{plugin_port}','audience':'ha-tunnel'}},
         'httpPlugins':[{'name':'ha-policy','addr':f'127.0.0.1:{plugin_port}','path':'/handler',
@@ -18,6 +18,14 @@ class ServerRuntime(FrpRuntime):
         super().__init__(binary,config_path,diagnostics=diagnostics)
         self.store = store
         self.access = access
+
+    async def restart(self):
+        async with self.store.administration.exclusive('runtime'):
+            return await super().restart()
+
+    async def _launch(self):
+        self.store.admission.clear()
+        await super()._launch()
 
     async def revoke_and_disconnect(self, client_id):
         if self.access is not None:

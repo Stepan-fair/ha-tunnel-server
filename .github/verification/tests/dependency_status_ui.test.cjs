@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const node={textContent:''};const ctx=vm.createContext({byId:()=>node});
+vm.runInContext(fs.readFileSync('server/app/templates/dependency_status.js','utf8'),ctx);
+ctx.renderDependencyStatus({state:'waiting_dependency',local_ready:false,external:'unknown'});
+assert.match(node.textContent,/Ожидание/);assert.match(node.textContent,/не проверена/);
+ctx.renderDependencyStatus({state:'ready',local_ready:true,external:'unknown'});
+assert.match(node.textContent,/NPM подтверждён/);assert.match(node.textContent,/не проверена/);
+ctx.renderDependencyStatus({state:'invalid_candidate',local_ready:false,external:'unknown'});
+assert.match(node.textContent,/не совпадает/);
+ctx.renderDependencyStatus({state:'proof_expired',local_ready:false,external:'unknown'});
+assert.match(node.textContent,/истекло/);
+ctx.renderDependencyStatus({state:'ready',local_ready:true,local_health:'unhealthy',external:'unknown'});
+assert.match(node.textContent,/Локальный сервис недоступен/);
+ctx.renderDependencyStatus({state:'ready',local_ready:true,local_health:'healthy',external:'unknown'});
+assert.match(node.textContent,/Локальная проверка сервиса успешна/);
+console.log('PASS dependency status UI: local owner proof, waiting/invalid/expired, external unknown');

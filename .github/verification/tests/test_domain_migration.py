@@ -22,7 +22,7 @@ async def ready(draft):return dict(dns=True,tls=True,wildcard=True,ready=True)
 
 def context(tmp_path):
     store,creds,repo,now,snap=funded(tmp_path/'state')
-    old=dict(base_domain='example.org',server_url='https://tunnel.example.org',npm_host='npm',
+    old=dict(base_domain='example.org',server_url='https://tunnel.example.org',npm_host='localhost',
         admin_user_ids=['admin'],reserved_names=[],bandwidth_limit_mb=10)
     setup=SetupService(tmp_path,Supervisor(old));setup.options=old
     migration=DomainMigration(store,setup,Access(),readiness=ready)
@@ -53,7 +53,7 @@ async def test_move_preserves_finance_and_manual_pause_invalidates_credentials(t
     with pytest.raises(ConflictError):reopened.redeem(ordinary.code,int(now[0]))
     assert reopened.list_clients()==before
     reopened.redeem(reopened.reissue(creds.client_id,int(now[0]),transfer=True,
-        confirm_domain=moved['domain'],expected_revision=moved['revision']).code,int(now[0]))
+        confirm_domain=moved['domain'],expected_revision=before[0]['revision']).code,int(now[0]))
     transferred=reopened.access_snapshot(creds.client_id,now[0])
     assert transferred['generation']>moved['generation']
     assert transferred['revision']>moved['revision']

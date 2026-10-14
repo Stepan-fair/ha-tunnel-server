@@ -188,7 +188,7 @@ def test_financial_backup_uses_new_format_and_preserves_money(tmp_path):
     Authority(store.path.parent/'identity.key','http://localhost')
     ensure_pki(store.path.parent/'pki','tunnel.example.org')
     blob=export_state(store.path.parent,store,'a strong test password')
-    assert blob[:5]==b'HATB4'
+    assert blob[:5]==b'HATB5'
     target=tmp_path/'restored'
     restore_state(blob,'a strong test password',target,'example.org','tunnel.example.org')
     restored=Store(target/'state.db','example.org',clock=lambda:now[0])

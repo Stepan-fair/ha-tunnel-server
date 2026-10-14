@@ -41,6 +41,8 @@ async def test_outage_backup_preserves_completed_history_not_portable_age(tmp_pa
 def test_delete_retains_ledger_and_backup_valid(tmp_path):
     store,creds,repo,now,snap=funded(tmp_path/'source')
     store.revoke(creds.client_id)
+    command(repo,creds.client_id,'set_balance',0,now[0])
+    now[0]=snap['billing']['paid_until']+1
     store.delete_revoked(creds.client_id,store.access_snapshot(creds.client_id,now[0])['revision'])
     assert len(operations(store,'purchase'))==1
     target=tmp_path/'target'

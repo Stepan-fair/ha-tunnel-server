@@ -7,7 +7,7 @@ from server.app.journal import Actor
 
 OP_FIELDS=('operation_id','client_id','kind','at','delta_kopecks','balance_before','balance_after',
     'price_kopecks','paid_from','paid_until','actor','details')
-KINDS={'set_price','topup','set_balance','purchase','compensation'}
+KINDS={'set_price','topup','set_balance','purchase','compensation','period_correction'}
 
 
 def validate_subscription(row):
@@ -41,19 +41,35 @@ def restore_financial(db,payload):
         actor,details=json.loads(row['actor']),json.loads(row['details'])
         if not isinstance(actor,dict) or set(actor)!={'source','user_id'} or actor['source'] not in ('system','timer','web','client','mqtt'): raise ValueError()
         if actor['user_id'] is not None and (not isinstance(actor['user_id'],str) or len(actor['user_id'])>128): raise ValueError()
-        if not isinstance(details,dict) or set(details)-{'timezone','anchor_day','days'}: raise ValueError()
+        if not isinstance(details,dict): raise ValueError()
+        if row['kind']=='period_correction':
+            if set(details)!={'timezone','anchor_day','reason','old_period','operation_ids'} or row['delta_kopecks']!=0: raise ValueError()
+            if not isinstance(details['reason'],str) or not 1<=len(details['reason'].strip())<=500: raise ValueError()
+            old=details['old_period']
+            if not isinstance(old,dict) or set(old)!={'paid_from','paid_until','timezone','anchor_day'}: raise ValueError()
+            Period(old['paid_from'],old['paid_until'],old['anchor_day'],old['timezone'])
+            ids=details['operation_ids']
+            if not isinstance(ids,list) or not ids or len(ids)>10000 or any(not isinstance(i,str) or not 1<=len(i)<=256 for i in ids) or len(ids)!=len(set(ids)): raise ValueError()
+            from server.app.clock_repair import reconciled_period
+            period=reconciled_period(row['paid_from'],row['paid_until'],details['timezone'])
+            if row['paid_until']!=period.end or details['anchor_day']!=period.anchor_day or not row['paid_from']<=row['at']<row['paid_until']: raise ValueError()
+        elif set(details)-{'timezone','anchor_day','days'}: raise ValueError()
         zone(details['timezone'])
         if 'days' in details and (type(details['days']) is not int or not 0<=details['days']<=2**31-1): raise ValueError()
         if (row['paid_from'] is None)!=(row['paid_until'] is None): raise ValueError()
         if row['paid_until'] is not None: Period(row['paid_from'],row['paid_until'],details['anchor_day'],details['timezone'])
         elif details['anchor_day'] is not None: raise ValueError()
         db.execute('INSERT INTO billing_operations ('+','.join(OP_FIELDS)+') VALUES ('+','.join('?' for _ in OP_FIELDS)+')',tuple(row[k] for k in OP_FIELDS))
+    for row in operations:
+        if row['kind']=='period_correction':
+            for ident in json.loads(row['details'])['operation_ids']:
+                if not db.execute("SELECT 1 FROM billing_operations WHERE operation_id=? AND client_id=? AND kind='purchase'",(ident,row['client_id'])).fetchone(): raise ValueError()
     for item in commands:
         if not isinstance(item,dict) or set(item)!={'client_id','command_id','request','result'}: raise ValueError()
         if not db.execute('SELECT 1 FROM clients WHERE id=?',(item['client_id'],)).fetchone(): raise ValueError()
         if not isinstance(item['command_id'],str) or not 1<=len(item['command_id'])<=128: raise ValueError()
         request,result=json.loads(item['request']),json.loads(item['result'])
-        if not isinstance(request,list) or len(request)!=4 or request[0] not in KINDS-{'purchase','compensation'}: raise ValueError()
+        if not isinstance(request,list) or len(request)!=4 or request[0] not in {'set_price','topup','set_balance'}: raise ValueError()
         if type(request[1]) is not int or request[1]<0: raise ValueError()
         money_integer(request[2],negative=request[0]=='set_balance'); zone(request[3])
         validate_command_result(result,item['client_id'])

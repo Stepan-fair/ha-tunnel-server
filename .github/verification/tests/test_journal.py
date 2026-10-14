@@ -106,7 +106,7 @@ def test_backup_v3_journal_v1_v2_compatible(tmp_path):
     ensure_pki(store.path.parent/'pki', 'tunnel.example.org')
     before = journal(store).page()['items']
     blob = export_state(store.path.parent, store, 'a strong test password')
-    assert blob[:5] == b'HATB3'
+    assert blob[:5] == b'HATB5'
     target = tmp_path/'target'
     restore_state(blob, 'a strong test password', target, 'example.org', 'tunnel.example.org')
     restored = Store(target/'state.db', 'example.org')
@@ -149,18 +149,21 @@ async def test_journal_calendar_filter_uses_ha_timezone(tmp_path):
         assert len(rows)==1 and rows[0]['at']==datetime(2026,1,1,22,tzinfo=timezone.utc).timestamp()
 
 
-async def test_web_revoke_actor_is_preserved_with_legacy_disconnect(tmp_path):
+async def test_web_revoke_actor_is_preserved_with_revision_command(tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
     from server.app.identity import Authority
     from server.app.web import make_ingress_app
     store, creds = connected(tmp_path)
-    async def disconnect(cid): store.revoke(cid)
+    from server.app.access import AccessService
+    from server.app.relay import ClientRelay
+    relay=ClientRelay(store,store.now)
+    async def disconnect(cid): pass
     options={'ingress_ips':['127.0.0.1'],'admin_user_ids':['owner'],'server_url':'https://tunnel.example.org'}
-    async with TestClient(TestServer(make_ingress_app(store,Authority(tmp_path/'identity.key','http://localhost'),options,disconnect))) as client:
+    async with TestClient(TestServer(make_ingress_app(store,Authority(tmp_path/'identity.key','http://localhost'),options,disconnect,access=AccessService(store,relay,store.now)))) as client:
         headers={'X-Remote-User-Id':'owner'}
         state=await(await client.get('/api/state',headers=headers)).json()
         headers['X-CSRF-Token']=state['csrf']
-        assert (await client.post('/api/clients/'+creds.client_id+'/revoke',headers=headers,json={})).status == 200
+        assert (await client.post('/api/clients/'+creds.client_id+'/revoke',headers=headers,json={'revision':store.access_snapshot(creds.client_id,store.now())['revision'],'command_id':'revoke'})).status == 200
         row=journal(store).page(action='revoke')['items'][0]
         assert row['source']=='web' and row['user_id']=='owner'
 
@@ -179,7 +182,11 @@ def test_original_v2_backup_remains_readable(tmp_path):
     password='a strong test password'
     latest=export_state(store.path.parent,store,password)
     payload=json.loads(AESGCM(key(password,latest[5:21])).decrypt(latest[21:33],latest[33:],latest[:5]))
-    payload.pop('audit'); payload['version']=2
+    from server.app.migrations import BILLING_COLUMNS
+    for field in ('created_at','billing_operations','billing_commands','availability','audit'): payload.pop(field)
+    for row in payload['clients']:
+        for field in BILLING_COLUMNS: row.pop(field)
+    payload['version']=2
     salt,nonce=secrets.token_bytes(16),secrets.token_bytes(12)
     blob=b'HATB2'+salt+nonce+AESGCM(key(password,salt)).encrypt(nonce,json.dumps(payload).encode(),b'HATB2')
     restore_state(blob,password,tmp_path/'target','example.org','tunnel.example.org')
