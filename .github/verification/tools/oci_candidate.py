@@ -18,6 +18,9 @@ INDEX = 'application/vnd.oci.image.index.v1+json'
 MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
 CONFIG = 'application/vnd.oci.image.config.v1+json'
 ATTEST = 'application/vnd.in-toto+json'
+ARTIFACT = 'application/vnd.docker.attestation.manifest.v1+json'
+EMPTY = 'application/vnd.oci.empty.v1+json'
+EMPTY_DIGEST = 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
 LAYERS = {'application/vnd.oci.image.layer.v1.tar', 'application/vnd.oci.image.layer.v1.tar+gzip',
           'application/vnd.oci.image.layer.v1.tar+zstd'}
 MAX_ARCHIVE = 8 * 1024**3
@@ -180,11 +183,20 @@ class Archive:
         if parse:
             return read_json(self.raw(name))
 
-    def document(self, descriptor, media):
+    def document(self, descriptor, media, *, attestation_subject=None):
         value = self.descriptor(descriptor, {media}, parse=True)
         require(isinstance(value, dict) and value.get('schemaVersion') == 2 and value.get('mediaType') == media,
                 'Invalid graph media/schema')
-        require('subject' not in value, 'Unexpected graph subject')
+        if attestation_subject is not None and ('subject' in value or 'artifactType' in value):
+            require(media == MANIFEST and value.get('artifactType') == ARTIFACT,
+                    'Unexpected attestation artifact type')
+            expected = {key: attestation_subject[key] for key in ('mediaType', 'digest', 'size')}
+            require(value.get('subject') == expected, 'Artifact subject mismatch')
+            # Account for the edge using the same physical blob/digest/size checks.
+            self.descriptor(value['subject'], {MANIFEST})
+        else:
+            require('subject' not in value, 'Unexpected graph subject')
+            require('artifactType' not in value, 'Unexpected graph artifact type')
         return value
 
 
@@ -200,6 +212,7 @@ def verify(path, revision, version, platform='linux/amd64'):
         index = read_json(envelope)
         require(isinstance(index, dict) and index.get('schemaVersion') == 2 and
                 index.get('mediaType', INDEX) == INDEX, 'Invalid layout index')
+        require('subject' not in index and 'artifactType' not in index, 'Unexpected layout index artifact')
         manifests = index.get('manifests')
         require(isinstance(manifests, list) and 1 <= len(manifests) <= 16, 'Manifest count limit')
         index_digest = digest(envelope)
@@ -238,10 +251,18 @@ def verify(path, revision, version, platform='linux/amd64'):
             annotations = item.get('annotations', {})
             require(annotations.get('vnd.docker.reference.type') == 'attestation-manifest' and
                     annotations.get('vnd.docker.reference.digest') == selected['digest'], 'Attestation reference mismatch')
-            attestation = archive.document(item, MANIFEST)
-            att_config = archive.descriptor(attestation.get('config'), {CONFIG}, parse=True)
-            require(isinstance(att_config, dict) and att_config.get('architecture') == 'unknown' and
-                    att_config.get('os') == 'unknown', 'Invalid attestation config')
+            attestation = archive.document(item, MANIFEST, attestation_subject=selected)
+            if attestation.get('artifactType') == ARTIFACT:
+                # The verified Buildx format carries exactly this inline empty
+                # config AND its physical blob. Do not enable general inline data.
+                empty = {'mediaType': EMPTY, 'digest': EMPTY_DIGEST, 'size': 2, 'data': 'e30='}
+                require(attestation.get('config') == empty, 'Invalid artifact empty config')
+                physical = {key: value for key, value in attestation['config'].items() if key != 'data'}
+                require(archive.descriptor(physical, {EMPTY}, parse=True) == {}, 'Invalid empty config blob')
+            else:
+                att_config = archive.descriptor(attestation.get('config'), {CONFIG}, parse=True)
+                require(isinstance(att_config, dict) and att_config.get('architecture') == 'unknown' and
+                        att_config.get('os') == 'unknown', 'Invalid attestation config')
             att_layers = attestation.get('layers')
             require(isinstance(att_layers, list) and 1 <= len(att_layers) <= 16, 'Attestation layer limit')
             for layer in att_layers:

@@ -15,13 +15,15 @@ MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
 CONFIG = 'application/vnd.oci.image.config.v1+json'
 LAYER = 'application/vnd.oci.image.layer.v1.tar+gzip'
 ATTEST = 'application/vnd.in-toto+json'
+ARTIFACT = 'application/vnd.docker.attestation.manifest.v1+json'
+EMPTY = 'application/vnd.oci.empty.v1+json'
 REVISION = 'a' * 40
 VERSION = '0.4.3'
 
 def encoded(value):
     return json.dumps(value, separators=(',', ':')).encode()
 
-def fixture(tmp_path, *, wrap=True, revision=REVISION, platform='amd64', change=None):
+def fixture(tmp_path, *, wrap=True, revision=REVISION, platform='amd64', change=None, artifact=False):
     blobs = {}
     def blob(value, media):
         data = value if isinstance(value, bytes) else encoded(value)
@@ -35,13 +37,25 @@ def fixture(tmp_path, *, wrap=True, revision=REVISION, platform='amd64', change=
     runnable = blob({'schemaVersion': 2, 'mediaType': MANIFEST, 'config': config, 'layers': [layer]}, MANIFEST)
     runnable['platform'] = {'os': 'linux', 'architecture': platform}
     layers = []
-    for kind in ('https://slsa.dev/provenance/v0.2', 'https://spdx.dev/Document'):
-        layers.append(blob({'_type': 'https://in-toto.io/Statement/v0.1', 'predicateType': kind,
+    for kind in ('https://slsa.dev/provenance/v1' if artifact else 'https://slsa.dev/provenance/v0.2',
+                 'https://spdx.dev/Document'):
+        layers.append(blob({'_type': 'https://in-toto.io/Statement/v1' if artifact else 'https://in-toto.io/Statement/v0.1', 'predicateType': kind,
             'subject': [{'name': 'test', 'digest': {'sha256': runnable['digest'][7:]}}],
             'predicate': {'buildType': 'https://mobyproject.org/buildkit@v1', 'spdxVersion': 'SPDX-2.3'}}, ATTEST))
         layers[-1]['annotations'] = {'in-toto.io/predicate-type': kind}
-    attest = blob({'schemaVersion': 2, 'mediaType': MANIFEST, 'config': blob(
-        {'architecture': 'unknown', 'os': 'unknown', 'rootfs': {'type': 'layers', 'diff_ids': []}}, CONFIG), 'layers': layers}, MANIFEST)
+    # Actual Buildx archives from both roles use this OCI 1.1 artifact structure,
+    # including the physical {} blob AND its canonical inline representation.
+    if artifact:
+        att_config = blob(b'{}', EMPTY)
+        att_config['data'] = 'e30='
+        document = {'artifactType': ARTIFACT,
+                    'subject': {key: runnable[key] for key in ('mediaType', 'digest', 'size')}}
+    else:
+        att_config = blob({'architecture': 'unknown', 'os': 'unknown',
+                           'rootfs': {'type': 'layers', 'diff_ids': []}}, CONFIG)
+        document = {}
+    attest = blob({'schemaVersion': 2, 'mediaType': MANIFEST, 'config': att_config,
+                   'layers': layers, **document}, MANIFEST)
     attest.update(platform={'os': 'unknown', 'architecture': 'unknown'}, annotations={
         'vnd.docker.reference.type': 'attestation-manifest', 'vnd.docker.reference.digest': runnable['digest']})
     index = {'schemaVersion': 2, 'mediaType': INDEX, 'manifests': [runnable, attest]}
@@ -65,15 +79,18 @@ def gate():
     assert Path('tools/oci_candidate.py').is_file(), 'Immutable OCI verification gate is missing'
     return importlib.import_module('tools.oci_candidate')
 
+@pytest.mark.parametrize('artifact', [False, True])
 @pytest.mark.parametrize('wrap', [False, True])
-def test_verifies_complete_index_and_distinguishes_layout_envelope(tmp_path, wrap):
-    path, root, runnable, config, layer, _ = fixture(tmp_path, wrap=wrap)
+def test_verifies_complete_index_and_distinguishes_layout_envelope(tmp_path, wrap, artifact):
+    path, root, runnable, config, layer, _ = fixture(tmp_path, wrap=wrap, artifact=artifact)
     result = gate().verify(path, REVISION, VERSION)
     assert result['index_digest'] == root['digest']
     assert result['manifest_digest'] == runnable['digest']
     assert result['config_digest'] == config['digest']
     assert result['layers'] == [layer['digest']]
     assert len(result['attestations']) == 1
+    if artifact:
+        assert result['descriptors']['sha256:' + hashlib.sha256(b'{}').hexdigest()] == [EMPTY, 2]
 
 @pytest.mark.parametrize('target', ['layer', 'index', 'attestation'])
 def test_rejects_replaced_graph_bytes(tmp_path, target):
@@ -166,12 +183,13 @@ def test_executable_publish_gate_uses_original_archive_and_full_readback(tmp_pat
         with pytest.raises(ValueError): module.publish(*args, require_absent=absent)
         if case != 'registry-mismatch': assert not published
 
+@pytest.mark.parametrize('artifact', [False, True])
 @pytest.mark.parametrize('wrap', [False, True])
-def test_roundtrip_accepts_repacked_layout_but_not_changed_graph(tmp_path, monkeypatch, wrap):
-    path, _, _, config, _, _ = fixture(tmp_path, wrap=wrap)
+def test_roundtrip_accepts_repacked_layout_but_not_changed_graph(tmp_path, monkeypatch, wrap, artifact):
+    path, _, _, config, _, _ = fixture(tmp_path, wrap=wrap, artifact=artifact)
     other = tmp_path / 'readback'
     other.mkdir()
-    repacked, *_ = fixture(other, wrap=not wrap)
+    repacked, *_ = fixture(other, wrap=not wrap, artifact=artifact)
     module = gate()
     expected = module.verify(path, REVISION, VERSION)
     def run(command, **kwargs):
@@ -313,3 +331,84 @@ def test_sparse_pax_rejected_before_map_handler_or_body_read(version, global_hea
             pass
     assert handlers == []
     assert reader.body_reads == 0
+
+
+@pytest.mark.parametrize('case', [
+    'subject-digest', 'subject-size', 'subject-media', 'subject-null', 'subject-absent',
+    'subject-inline', 'subject-external', 'subject-extra', 'artifact-unknown', 'artifact-absent',
+    'config-data', 'config-no-data', 'config-digest', 'config-size', 'config-media',
+    'config-external', 'config-extra', 'config-missing-blob', 'config-replaced-blob',
+    'statement-subject', 'statement-empty', 'statement-absent', 'statement-null', 'extra-blob',
+])
+def test_artifact_attestation_rejects_unbound_or_noncanonical_graph(tmp_path, case):
+    def change(blobs, index):
+        descriptor = index['manifests'][1]
+        old = 'blobs/sha256/' + descriptor['digest'][7:]
+        document = json.loads(blobs.pop(old))
+        subject, config = document['subject'], document['config']
+        if case == 'subject-digest': subject['digest'] = 'sha256:' + '0' * 64
+        elif case == 'subject-size': subject['size'] += 1
+        elif case == 'subject-media': subject['mediaType'] = INDEX
+        elif case == 'subject-null': document['subject'] = None
+        elif case == 'subject-absent': document.pop('subject')
+        elif case == 'subject-inline': subject['data'] = 'e30='
+        elif case == 'subject-external': subject['urls'] = ['https://example.invalid/blob']
+        elif case == 'subject-extra': subject['artifactType'] = ARTIFACT
+        elif case == 'artifact-unknown': document['artifactType'] = 'unknown'
+        elif case == 'artifact-absent': document.pop('artifactType')
+        elif case == 'config-data': config['data'] = 'bnVsbA=='
+        elif case == 'config-no-data': config.pop('data')
+        elif case == 'config-digest': config['digest'] = 'sha256:' + '0' * 64
+        elif case == 'config-size': config['size'] = 3
+        elif case == 'config-media': config['mediaType'] = CONFIG
+        elif case == 'config-external': config['urls'] = ['https://example.invalid/blob']
+        elif case == 'config-extra': config['artifactType'] = ARTIFACT
+        elif case == 'config-missing-blob': blobs.pop('blobs/sha256/' + config['digest'][7:])
+        elif case == 'config-replaced-blob': blobs['blobs/sha256/' + config['digest'][7:]] = b'[]'
+        elif case == 'extra-blob': blobs['blobs/sha256/' + hashlib.sha256(b'unbound').hexdigest()] = b'unbound'
+        elif case.startswith('statement-'):
+            layer = document['layers'][0]
+            statement = json.loads(blobs.pop('blobs/sha256/' + layer['digest'][7:]))
+            if case == 'statement-subject': statement['subject'][0]['digest']['sha256'] = '0' * 64
+            elif case == 'statement-empty': statement['subject'] = []
+            elif case == 'statement-absent': statement.pop('subject')
+            elif case == 'statement-null': statement['subject'] = None
+            data = encoded(statement)
+            layer.update(digest='sha256:' + hashlib.sha256(data).hexdigest(), size=len(data))
+            blobs['blobs/sha256/' + layer['digest'][7:]] = data
+        data = encoded(document)
+        descriptor.update(digest='sha256:' + hashlib.sha256(data).hexdigest(), size=len(data))
+        blobs['blobs/sha256/' + descriptor['digest'][7:]] = data
+    path, *_ = fixture(tmp_path, artifact=True, change=change)
+    with pytest.raises(ValueError):
+        gate().verify(path, REVISION, VERSION)
+
+
+@pytest.mark.parametrize('location', ['envelope', 'index', 'runnable', 'legacy-attestation'])
+@pytest.mark.parametrize('field', ['subject', 'artifactType'])
+def test_rejects_subject_or_artifact_type_outside_supported_artifact(tmp_path, location, field):
+    def change(blobs, index):
+        value = None if field == 'subject' else ARTIFACT
+        if location == 'index':
+            index[field] = value
+        elif location in ('runnable', 'legacy-attestation'):
+            descriptor = index['manifests'][0 if location == 'runnable' else 1]
+            document = json.loads(blobs.pop('blobs/sha256/' + descriptor['digest'][7:]))
+            document[field] = value
+            data = encoded(document)
+            descriptor.update(digest='sha256:' + hashlib.sha256(data).hexdigest(), size=len(data))
+            blobs['blobs/sha256/' + descriptor['digest'][7:]] = data
+    path, *_, blobs = fixture(tmp_path, change=change)
+    if location == 'envelope':
+        index = json.loads(blobs['index.json'])
+        index[field] = None if field == 'subject' else ARTIFACT
+        blobs['index.json'] = encoded(index)
+        write_tar(path, blobs.items())
+    if location == 'envelope':
+        error = 'Unexpected layout index artifact'
+    elif location == 'legacy-attestation':
+        error = 'Unexpected attestation artifact type' if field == 'subject' else 'Artifact subject mismatch'
+    else:
+        error = 'Unexpected graph subject' if field == 'subject' else 'Unexpected graph artifact type'
+    with pytest.raises(ValueError, match=error):
+        gate().verify(path, REVISION, VERSION)

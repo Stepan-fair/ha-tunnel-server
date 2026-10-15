@@ -81,6 +81,7 @@ jobs:
           context: ./__ROLE__
           platforms: linux/${{ matrix.arch }}
           push: false
+          tags: ha-tunnel-__ROLE__-candidate:${{ github.sha }}
           outputs: type=oci,dest=candidate.tar
           sbom: true
           provenance: mode=max

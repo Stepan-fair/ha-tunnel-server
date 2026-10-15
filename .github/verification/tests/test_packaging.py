@@ -309,3 +309,23 @@ Path.lstat = lambda self: SimpleNamespace(st_mode=%d, st_size=8*1024**3+1)
     assert result_file.read_text() == 'present=false\n'
     assert workflow['jobs']['publish']['needs'] == 'build'
     assert 'continue-on-error' not in next(step for step in steps if 'oci_candidate.py verify' in step.get('run', ''))
+
+
+@pytest.mark.parametrize('role', ['server', 'client'])
+def test_single_oci_build_has_local_source_name_for_statement_subjects(tmp_path, role):
+    from tools.release_repository import release_repository
+    output = tmp_path / 'release'
+    release_repository(role, output)
+    workflow = YAML(typ='safe').load((output / '.github/workflows/build.yml').read_text())
+    builds = [step for job in workflow['jobs'].values() for step in job['steps']
+              if step.get('uses', '').startswith('docker/build-push-action@')]
+    assert len(builds) == 1
+    options = builds[0]['with']
+    # BuildKit constructs in-toto defaultSubjects from exporter image names.
+    # A local source-specific name provides that binding without a registry push.
+    assert options.get('tags') == 'ha-tunnel-' + role + '-candidate:${{ github.sha }}'
+    assert options['push'] is False
+    assert options['outputs'] == 'type=oci,dest=candidate.tar'
+    assert options['sbom'] is True and options['provenance'] == 'mode=max'
+    assert workflow['jobs']['build']['permissions'] == {'contents': 'read'}
+    assert workflow['jobs']['publish']['needs'] == 'build'
