@@ -128,11 +128,17 @@ async def test_setup_view_serves_notification_form_and_configures_independently(
     await worker.close()
 
 
-async def test_server_status_contact_counts_without_frp_or_ha_sample(core,tmp_path):
+@pytest.mark.parametrize('receipt',[1000.0,570.4068639148983])
+async def test_server_status_contact_counts_without_frp_or_ha_sample(core,tmp_path,monkeypatch,receipt):
+    import math
+    from types import SimpleNamespace
     from server.app.web import make_public_app
     from server.app.store import Store
     from shared.notifications import server_snapshots
     from aiohttp import encode_basic_auth
+    # Control only the notification source clock, not asyncio's real deadlines.
+    now=[receipt]
+    monkeypatch.setattr('shared.notifications.time',SimpleNamespace(monotonic=lambda:now[0]))
     store=Store(tmp_path/'state.db','example.org',clock=lambda:1000000)
     c=store.redeem(store.issue('alpha',1000000).code,1000000)
     store.notification_contacts={f'deleted-{i}':1 for i in range(4096)}
@@ -142,16 +148,26 @@ async def test_server_status_contact_counts_without_frp_or_ha_sample(core,tmp_pa
         assert response.status==200
     assert server_snapshots(store)[0]['contact']
     assert set(store.notification_contacts)=={c.client_id}
-    receipt=store.notification_contacts[c.client_id]
+    assert store.notification_contacts[c.client_id]==receipt
     worker=make_worker(tmp_path,core,[])
     settings=worker.state.view()['settings']; settings['connection']=True
     worker.state.configure(settings,0,'enable')
     worker.snapshots=lambda:server_snapshots(store)
-    worker.monotonic=lambda:receipt+599
+    worker.monotonic=lambda:now[0]
     try:
+        now[0]=receipt+599
         await worker.tick(); assert not core.cards
-        worker.monotonic=lambda:receipt+600
-        await worker.tick(); assert len(core.cards)==1
+        now[0]=math.nextafter(receipt+600,-math.inf)
+        await worker.tick(); assert not core.cards
+        now[0]=receipt+600
+        await worker.tick()
+        assert len(core.cards)==1, {
+            'diagnostic':worker.diagnostic,'receipt':receipt,'now':now[0],
+            'observer_ready':worker.adapter.ready.is_set(),
+            'observer_done':worker.observer is None or worker.observer.done(),
+            'eligible_count':len(worker.eligible),'pending_count':len(worker.pending()),
+            'desired_count':sum(row['desired'] is not None for row in worker.state.records.values()),
+        }
         assert '10 минут' in next(iter(core.cards.values()))['message']
     finally: await worker.close()
 

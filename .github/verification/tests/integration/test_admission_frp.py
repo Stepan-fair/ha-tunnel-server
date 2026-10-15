@@ -5,6 +5,7 @@ A local TCP bridge injects disconnections; Linux /proc measures actual socket
 counts after settling (admission counts alone cannot prove FRP bounds).
 """
 import asyncio
+from collections import Counter
 from contextlib import asynccontextmanager
 from copy import deepcopy
 import json
@@ -256,7 +257,7 @@ def control_socket_count(pid,port):
     return count
 
 
-async def test_real_reservation_churn_has_one_control_socket(environment,tmp_path,monkeypatch,record_property):
+async def test_real_reservation_churn_has_one_control_socket(environment,tmp_path,monkeypatch,record_testsuite_property):
     store,authority,server,plugin,pki,clients,session,url,port=environment
     c,_,config=clients[0]
     changed_config=deepcopy(server.config)
@@ -275,10 +276,13 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
             except OSError:
                 await asyncio.sleep(.1)
     calls=[]
+    operations=Counter()
     def no_activity(op,content,*args):
         if op in ('Ping','NewWorkConn','NewProxy'):
+            operations[(op,'rejected')]+=1
             return {'reject':True,'reject_reason':'isolated test: keep reservation unconfirmed'}
         result=authorize(op,content,*args)
+        operations[(op,'rejected' if result['reject'] else 'accepted')]+=1
         if op=='Login' and not result['reject']: calls.append(deepcopy(result['content']))
         return result
     monkeypatch.setattr('server.app.web.authorize',no_activity)
@@ -291,6 +295,11 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
             count=len(calls)
             candidate=deepcopy(config)
             candidate['transport']['tcpMux']=False
+            # FRP v0.71.0 heartbeatWorker/BackoffUntil sends its first Ping
+            # immediately; rejecting it closes the control via Pong.Error.
+            # This login-only fixture must send no activity at all. The server
+            # heartbeat timeout and production client heartbeats stay intact.
+            candidate['transport']['heartbeatInterval']=-1
             candidate['proxies']=[]
             candidate['loginFailExit']=True
             runtime=ClientRuntime(FRPC,tmp_path/f'reservation-{i}.json')
@@ -308,6 +317,27 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
         assert len({call['run_id'] for call in calls})==1
         assert all(call['client_id']==c.client_id for call in calls)
         assert len({call['metas']['ha_tunnel_session'] for call in calls})==len(calls)
-        record_property('stabilized_control_socket_counts',json.dumps(samples))
+        assert operations[('Ping','rejected')]==0
+        record_testsuite_property('reservation_churn.stabilized_control_socket_counts',json.dumps(samples))
+        record_testsuite_property('reservation_churn.plugin_operations',json.dumps({
+            ':'.join(key):value for key,value in sorted(operations.items())}))
+    except BaseException:
+        # Only bounded numeric state: never dump FRP config, Login payloads,
+        # tokens, process nonces, RunIDs, session epochs or raw child output.
+        try:
+            sockets={'all':socket_count(server_pid),'control':control_socket_count(server_pid,port)}
+        except OSError:
+            sockets={'unavailable':True}
+        print('reservation_churn_diagnostic',json.dumps({
+            'iteration':len(samples),'samples':samples,
+            'server_pid':server_pid,'server_status':server.status(),
+            'sockets':sockets,
+            'client_statuses':[runtime.status() for runtime in runtimes],
+            'accepted_logins':len(calls),'admission':store.admission.counts(),
+            'distinct_epochs':len({call['metas']['ha_tunnel_session'] for call in calls}),
+            'operations':{':'.join(key):value for key,value in sorted(operations.items())},
+            'tcp_mux':False,'heartbeat_interval':candidate['transport']['heartbeatInterval'],
+        },sort_keys=True))
+        raise
     finally:
         for runtime in runtimes: await runtime.stop()

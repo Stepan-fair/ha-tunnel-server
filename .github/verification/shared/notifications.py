@@ -145,7 +145,9 @@ class NotificationWorker:
             self.contacts[key]=now
             self.state.observe(key,'connection','clear',None,context={}); return
         desired=None
-        if now-last>=600:
+        # Compare the deadline directly: subtracting fractional monotonic values
+        # can round (last + 600) - last below 600 at the exact boundary.
+        if now>=last+600:
             if context.get('phase')!='lost': context=dict(phase='lost',episode=secrets.token_hex(16),sent=False)
             desired=dict(title='HA Tunnel · Связь',message=f"Для {domain(row['domain'])} нет подтверждённого обмена 10 минут. Это не проверка работоспособности HA.",kind='connection_lost',mobile_key=context['episode'])
         elif row.get('contact') and context.get('phase')=='lost':
