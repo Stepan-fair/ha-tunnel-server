@@ -74,6 +74,30 @@ async def test_old_server_fallback():
         finally: await service.close()
 
 
+async def test_043_health_first_status_contract_with_current_server(tmp_path):
+    """Exact 0.4.3 request order/body, without importing an old runtime."""
+    from aiohttp import encode_basic_auth
+    from aiohttp.test_utils import TestClient, TestServer
+    from tests.test_security_hardening import fixture
+    from server.app.web import make_public_app
+    store, credentials, authority, _ = fixture(tmp_path)
+    identity = credentials.client_id
+    async with TestClient(TestServer(make_public_app(store, authority,
+            {'trusted_proxy_ips': ['127.0.0.1']}))) as client:
+        proxy_headers = {'X-Forwarded-Proto': 'https'}
+        health = await client.get('/health', headers=proxy_headers)
+        assert health.status == 200
+        discovery = await health.json()
+        assert discovery['protocol'] == 1 and discovery['status'] == 'ok'
+        assert 'access-v1' in discovery['capabilities']
+        response = await client.post('/v1/client/status', headers={**proxy_headers,
+            'Authorization': encode_basic_auth(identity, credentials.secret)},
+            json={'capabilities': ['access-v1', 'telemetry-v1']})
+        assert response.status == 200
+        assert validate_status(await response.json(), identity)['client_id'] == identity
+        assert store.status_authenticate(identity, credentials.secret) is not None
+
+
 async def test_rebind_same_client_preserves_http_configuration(tmp_path,monkeypatch):
     from unittest.mock import AsyncMock
     from tests.test_client_recovery import controller

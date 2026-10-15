@@ -159,9 +159,12 @@ async def test_cancelled_mqtt_dns_is_reaped_and_fresh_bridge_recovers(tmp_path,m
         task=asyncio.create_task(first.start()); await until(lambda:bool(children))
         task.cancel()
         with pytest.raises(asyncio.CancelledError): await task
-        for _ in range(40):
+        async def recreate():
             bridge=module.MqttBridge('a'*32,'server',service,lambda:[]); bridges.append(bridge)
             await bridge.start(); await bridge.close()
+        # Recreate during one DNS lifetime. Serial callers now share and await
+        # each job, so forty serial starts correctly span forty reaped jobs.
+        await asyncio.gather(*(recreate() for _ in range(40)))
         assert len(children)==1 and all(bridge._network is None for bridge in bridges)
         assert await asyncio.wait_for(asyncio.to_thread(lambda:'progress'),.5)=='progress'
         await asyncio.wait_for(children[0].wait(),2); await asyncio.sleep(.02)

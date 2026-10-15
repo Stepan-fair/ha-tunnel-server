@@ -195,7 +195,7 @@ def make_setup_app(setup,admin_check,*,ingress_ips=None,notifications=None):
     async def help_page(request): return web.json_response({'text':documentation(__file__)})
     async def asset(request):
         name=request.match_info['name']
-        if name not in ('app.js','dependency_status.js','notification_settings.js','style.css'): raise web.HTTPNotFound()
+        if name not in ('app.js','clock_repair.js','command_id.js','dependency_status.js','notification_settings.js','style.css'): raise web.HTTPNotFound()
         from shared.notifications import notification_asset
         body=notification_asset() if name=='notification_settings.js' else (Path(__file__).parent/'templates'/name).read_bytes()
         return web.Response(body=body,
