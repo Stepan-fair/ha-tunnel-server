@@ -7,7 +7,7 @@ import secrets
 import time
 from urllib.parse import unquote
 from aiohttp import web
-from shared.http import Limits, safe_errors, ingress_middleware, csrf_for
+from shared.http import Limits, safe_errors, ingress_middleware, csrf_for, TRUSTED_HTTPS
 from shared.protocol import Invitation
 from server.app.policy import authorize
 from server.app.store import ConflictError, BoundDomainError
@@ -47,7 +47,7 @@ def make_public_app(store, authority, options, access=None, telemetry=None):
         if (request.remote not in addresses or
                 request.headers.get('X-Forwarded-Proto')!='https'):
             raise web.HTTPForbidden()
-        request['trusted_https']=True
+        request[TRUSTED_HTTPS]=True
         from ipaddress import ip_address
         try: peer=str(ip_address(request.headers.get('X-Real-IP',request.remote)))
         except ValueError: raise web.HTTPForbidden()

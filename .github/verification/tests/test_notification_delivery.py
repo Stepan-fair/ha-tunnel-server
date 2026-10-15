@@ -401,26 +401,31 @@ async def test_unknown_identical_current_is_not_new_episode_proof(core,tmp_path)
     finally: await worker.close()
 
 
-async def test_ws_retry_reuses_one_bounded_underlying_dns_job(monkeypatch):
-    import socket
-    import threading
+async def test_ws_retry_reuses_one_bounded_underlying_dns_job(monkeypatch,tmp_path):
     from shared.ha_notifications import HaNotifications
-    from shared import ha_notifications as module
-    real=socket.getaddrinfo; release=threading.Event(); calls=[]
-    def lookup(host,*args,**kwargs):
-        if host=='notification-dns.invalid':
-            calls.append(host); release.wait(3)
-            raise OSError('synthetic resolver unavailable')
-        return real(host,*args,**kwargs)
-    monkeypatch.setattr(socket,'getaddrinfo',lookup)
+    from shared import ha_notifications as module, dns
+    worker=tmp_path/'slow_dns.py'; worker.write_text('import time\ntime.sleep(60)\n')
+    monkeypatch.setattr(dns,'_worker',str(worker)); monkeypatch.setattr(dns,'_DEADLINE',.5)
     monkeypatch.setattr(module,'CORE_WS','ws://notification-dns.invalid/websocket')
+    children=[]; original=asyncio.create_subprocess_exec
+    async def spawn(*args,**kwargs):
+        child=await original(*args,**kwargs); children.append(child); return child
+    monkeypatch.setattr(asyncio,'create_subprocess_exec',spawn)
     ha=HaNotifications('synthetic-token')
     try:
         for _ in range(5):
-            with pytest.raises(TimeoutError): await asyncio.wait_for(ha.observe(lambda e:None),.03)
-        assert len(calls)==1
-        await asyncio.wait_for(ha.close(),.3)
-    finally: release.set(); await ha.close(); await asyncio.sleep(.03)
+            try: await asyncio.wait_for(ha.observe(lambda e:None),.03)
+            except (TimeoutError,OSError,ValueError): pass
+            await asyncio.wait_for(ha.close(),.3)
+            ha=HaNotifications('synthetic-token')
+        assert len(children)==1
+        await asyncio.wait_for(children[0].wait(),2)
+        assert children[0].returncode is not None
+    finally:
+        await ha.close()
+        for child in children:
+            if child.returncode is None: child.kill()
+            await child.wait()
 
 
 async def test_enabling_ha_delivers_current_state_and_cleanup_cannot_claim_connection_warning(core,tmp_path):

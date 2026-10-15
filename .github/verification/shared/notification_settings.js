@@ -13,7 +13,7 @@ function mountNotificationSettings(root, request, commandId) {
  const testButton=make('button','Проверить доставку');testButton.type='button';
  const reload=make('button','Обновить форму');reload.type='button';reload.className='secondary';
  form.append(submit,testButton,reload);
- root.append(title,form,diagnostic,make('p','Настройки действуют только в этом HA. После перезапуска Core активная незакрытая карточка восстанавливается. Закрытие при отключённом наблюдателе может быть не замечено. Телефон обновляет карточку по tag; повторный звук зависит от Companion и ОС.'));
+ root.append(title,form,diagnostic,make('p','Настройки действуют только в этом HA. После перезапуска Core активная незакрытая карточка восстанавливается. Закрытие при отключённом наблюдателе может быть не замечено. На телефоне обновляется существующее уведомление; повторный звук зависит от Companion и ОС.'));
  let revision=null,csrf='',pending=null,pendingTest=null,busy=false;
  function status(code){diagnostic.textContent=code==='storage_error'?'Локальный журнал уведомлений повреждён. Исходный файл сохранён; уведомления остановлены.':code==='capacity'?'Достигнут лимит уведомлений. Доставка продолжится после освобождения очереди.':code==='mobile_catalog_unavailable'?'Список служб телефона временно недоступен. Сохранённые получатели оставлены.':code?'Уведомления временно недоступны. Подключение туннеля работает независимо.':'';}
  function render(data){
@@ -21,7 +21,7 @@ function mountNotificationSettings(root, request, commandId) {
   for(const [key,input] of Object.entries(fields)){if(key==='warning_days')input.value=String(data.settings[key]);else input.checked=data.settings[key];}
   targets.replaceChildren();const valid=s=>typeof s==='string'&&/^notify\.mobile_app_[a-z0-9_]{1,128}$/.test(s);
   const selected=data.settings.mobile_targets.filter(valid),services=[...new Set([...(data.services||[]).filter(valid),...selected])].slice(0,520);
-  for(const service of services){const option=make('option',service);option.value=service;option.selected=selected.includes(service);targets.append(option);}
+  for(const service of services){const option=make('option',service.slice('notify.mobile_app_'.length).replaceAll('_',' '));option.value=service;option.title=service;option.selected=selected.includes(service);targets.append(option);}
   status(data.diagnostic);submit.disabled=!!data.diagnostic&&data.diagnostic==='storage_error';testButton.disabled=submit.disabled;
  }
  async function load(){try{const response=await request('api/notifications');if(!response.ok)throw Error();render(await response.json());pending=null;pendingTest=null;}catch{diagnostic.textContent='Не удалось загрузить уведомления. Откройте панель через Home Assistant и обновите форму.';}}

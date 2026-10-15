@@ -140,6 +140,30 @@ async def test_busy_expiry_closes_captured_gateway_and_resumes_after_release(tmp
     assert runtime.addresses==() and new_process.kills==1
     await gateway.close()
 
+
+async def test_guard_alone_expires_proof_during_long_administrative_busy(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from server.app import npm_dependency
+    now=[100.]
+    monkeypatch.setattr(npm_dependency,'time',SimpleNamespace(monotonic=lambda:now[0]))
+    runtime,sup,resolve,store,gateway,processes=await runtime_case(tmp_path,monkeypatch)
+    assert await runtime.refresh()
+    old=processes[-1]
+    async with store.administration.exclusive('restore'):
+        guard=asyncio.create_task(runtime.guard())
+        await asyncio.sleep(0)
+        now[0]=131.
+        try:
+            async with asyncio.timeout(2):
+                while old.kills==0: await asyncio.sleep(.01)
+            assert runtime.current is None and runtime.addresses==() and len(processes)==1
+        finally:
+            guard.cancel()
+            with pytest.raises(asyncio.CancelledError): await guard
+    assert await runtime.refresh()
+    assert len(processes)==2 and runtime.addresses==('172.30.33.9',)
+    await gateway.close()
+
 async def test_revalidation_inflight_expiry_and_migration_do_not_reopen(tmp_path,monkeypatch):
     runtime,sup,resolve,store,gateway,processes=await runtime_case(tmp_path,monkeypatch)
     assert await runtime.refresh()
@@ -200,14 +224,15 @@ async def test_malformed_supervisor_ip_is_not_coerced(bad):
 async def test_real_resolver_selects_only_owned_ipv4_on_dual_stack_dns(monkeypatch):
     from server.app.npm_dependency import NpmDependency
     from server.app.availability_probe import NpmResolver
-    loop=asyncio.get_running_loop(); sup=Supervisor(); foreign=False
-    async def getaddrinfo(host,port,*,family,type):
-        assert host==HOST and family==socket.AF_INET and type==socket.SOCK_STREAM
+    from shared import dns
+    sup=Supervisor(); foreign=False
+    async def getaddrinfo(host,port,*,family):
+        assert host==HOST and family==socket.AF_INET
         # System AF_INET selection omits the otherwise available AAAA owner.
         result=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('172.30.33.9',0))]
         if foreign: result.append((socket.AF_INET,socket.SOCK_STREAM,6,'',('172.30.33.10',0)))
         return result
-    monkeypatch.setattr(loop,'getaddrinfo',getaddrinfo)
+    monkeypatch.setattr(dns,'getaddrinfo',getaddrinfo)
     dep=NpmDependency(sup); snap=await dep.validate_candidate({'npm_host':HOST})
     result=await NpmResolver('tunnel.example.org',snap.addresses).resolve('tunnel.example.org',443)
     assert len(result)==1 and result[0]['host']=='172.30.33.9' and result[0]['family']==socket.AF_INET

@@ -1,6 +1,7 @@
 import asyncio
 import os
-from aiohttp import ClientSession, ClientTimeout, ClientError, ClientConnectionError, WSMsgType
+from aiohttp import ClientTimeout, ClientError, ClientConnectionError, WSMsgType
+from shared.dns import session as ClientSession
 from client.app.enrollment import read_json
 
 CORE_ORIGIN='http://127.0.0.1:8123'

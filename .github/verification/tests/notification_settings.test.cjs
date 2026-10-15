@@ -17,6 +17,10 @@ async function run(role){
  assert.equal(calls.filter(c=>c.options).length,0,'page visit must not send messages');
  assert.equal(ui.targets.children.length,2,'keep selected unavailable target, exclude malicious labels');
  assert.ok(ui.targets.children.some(n=>n.value==='notify.mobile_app_saved'&&n.selected));
+ assert.equal(ui.targets.children.find(n=>n.value==='notify.mobile_app_phone').textContent,'phone');
+ services=['notify.mobile_app_demo_phone','notify.mobile_app_demo_tablet'];await ui.load();
+ assert.deepEqual(Array.from(ui.targets.children,n=>n.textContent),['demo phone','demo tablet','saved']);
+ assert.deepEqual(Array.from(ui.targets.children,n=>n.value),['notify.mobile_app_demo_phone','notify.mobile_app_demo_tablet','notify.mobile_app_saved']);
  assert.ok(ui.diagnostic.textContent.includes('телефон'));
  ui.fields.warning_days.value='0';await ui.save({preventDefault(){}});assert.equal(calls.filter(c=>c.options).length,0);
  ui.fields.warning_days.value='7';lost=true;await ui.save({preventDefault(){}});await ui.save({preventDefault(){}});

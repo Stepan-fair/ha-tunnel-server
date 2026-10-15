@@ -98,10 +98,11 @@ async def test_tunnel_probe_validates_real_tls_certificate(tmp_path,bad_name,mon
     from server.app.pki import ensure_pki
     from client.app.controller import verify_tunnel_tls
     pki=ensure_pki(tmp_path/'pki','tunnel.example.org' if not bad_name else 'wrong.example.org')
-    connect=asyncio.open_connection
-    async def local_connect(host,port,**kwargs):
-        return await connect('127.0.0.1',port,**kwargs)
-    monkeypatch.setattr(asyncio,'open_connection',local_connect)
+    from client.app import controller
+    from shared.dns import getaddrinfo
+    async def local_addresses(host,port,**kwargs):
+        return await getaddrinfo('127.0.0.1',port,**kwargs)
+    monkeypatch.setattr(controller,'getaddrinfo',local_addresses)
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(pki.cert,pki.key)
     async def accept(reader,writer):
@@ -140,7 +141,8 @@ async def test_tunnel_probe_reaches_ipv4_when_first_ipv6_address_stalls(tmp_path
             if sock.family==socket.AF_INET6:
                 await asyncio.Future()
             return await connect(sock,address)
-        monkeypatch.setattr(loop,'getaddrinfo',addresses)
+        from client.app import controller
+        monkeypatch.setattr(controller,'getaddrinfo',addresses)
         monkeypatch.setattr(loop,'sock_connect',stalled_ipv6)
         credentials={'tunnel_host':'tunnel.example.org','tunnel_port':port,'ca_pem':pki.ca.read_text()}
         await asyncio.wait_for(verify_tunnel_tls(credentials),timeout=2)

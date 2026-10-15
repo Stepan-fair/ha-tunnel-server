@@ -50,7 +50,10 @@ class ServiceProbe:
             try:
                 async with ClientSession(connector=connector,timeout=ClientTimeout(total=2),trust_env=False,auto_decompress=False) as session:
                     async with session.get(self.url,allow_redirects=False) as response:
-                        body=await response.content.read(1025)
+                        body=bytearray()
+                        async for chunk in response.content.iter_chunked(1024):
+                            body.extend(chunk)
+                            if len(body)>1024: raise ValueError('Health response too large')
                         import json
                         data=json.loads(body) if len(body)<=1024 else {}
                         self.last=response.status==200 and data.get('status')=='ok' and data.get('protocol')==1

@@ -121,6 +121,33 @@ def test_role_release_workflow_has_scoped_permissions(tmp_path):
     assert not (output/'client').exists()
 
 
+def test_generated_acceptance_and_baseline_do_not_enter_production_context(tmp_path):
+    from tools.release_repository import release_repository
+    output=tmp_path/'release';release_repository('client',output)
+    workflow=YAML(typ='safe').load((output/'.github/workflows/build.yml').read_text())
+    steps=workflow['jobs']['security-tests']['steps']
+    checkout=next(s for s in steps if s.get('with',{}).get('path')=='performance-baseline')
+    assert checkout['with']['ref']=='dce6378b7175ca30ee0d1bff68c27b74ba3c9a77'
+    assert checkout['with']['persist-credentials'] is False
+    build_index=next(i for i,s in enumerate(steps) if 'docker build ' in s.get('run',''))
+    assert build_index<steps.index(checkout)
+    production=workflow['jobs']['build']
+    assert production['steps'][0]['uses'].startswith('actions/checkout@')
+    assert all(s.get('with',{}).get('path')!='performance-baseline' for s in production['steps'])
+    measurement=next(s['run'] for s in steps if 'frp_performance.py' in s.get('run',''))
+    for required in ('--network none','--memory 768m','--cpus 2','--pids-limit 256',':/baseline:ro','trap ','timeout --kill-after=10s 150s'):
+        assert required in measurement
+    external=YAML(typ='safe').load((output/'.github/workflows/external_acceptance.yml').read_text())
+    assert set(external['on'])=={'workflow_dispatch'} and external['permissions']=={'contents':'read'}
+    check=external['jobs']['check']['steps'][-1]
+    assert check['env']=={'HA_TUNNEL_ACCEPTANCE_ORIGINS':'${{ secrets.HA_TUNNEL_ACCEPTANCE_ORIGINS }}'}
+    assert '-m tools.external_acceptance' in check['run'] and 'echo' not in check['run']
+    assert not (output/'client/tools/external_acceptance.py').exists()
+    assert (output/'.github/verification/tools/external_acceptance.py').is_file()
+    for name in ('UPGRADE_050.md','SECURITY_ASSESSMENT_050.md','SECURITY_FINDINGS_050.csv'):
+        assert (output/'docs'/name).read_bytes()==(Path('docs')/name).read_bytes()
+
+
 def test_release_runs_real_linux_tests_before_publication(tmp_path):
     from tools.release_repository import release_repository
     output=tmp_path/'release'

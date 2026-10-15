@@ -2,9 +2,12 @@ import asyncio
 import base64
 import secrets
 import ssl
+import aiohappyeyeballs
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, ClientError, ClientConnectorCertificateError
+from aiohttp import ClientTimeout, ClientError, ClientConnectorCertificateError
+from shared.dns import session as ClientSession
+from shared.dns import getaddrinfo
 from client.app.enrollment import enroll, read_json, EnrollmentProblem, BindingClient
 from client.app.ha_config import ConfigProblem
 from client.app.http_config import (preview_http, configure_http, check_http_ready,
@@ -23,10 +26,15 @@ def basic(username,password):
 async def verify_tunnel_tls(credentials):
     context=ssl.create_default_context(cadata=credentials['ca_pem'])
     context.minimum_version=ssl.TLSVersion.TLSv1_2
-    _,writer=await asyncio.wait_for(asyncio.open_connection(
-        credentials['tunnel_host'],credentials['tunnel_port'],ssl=context,
-        server_hostname=credentials['tunnel_host'],ssl_handshake_timeout=5,
-        happy_eyeballs_delay=0.25,interleave=1),timeout=7)
+    async with asyncio.timeout(7):
+        addresses=await getaddrinfo(credentials['tunnel_host'],credentials['tunnel_port'])
+        sock=await aiohappyeyeballs.start_connection(addresses,happy_eyeballs_delay=.25,interleave=1)
+        try:
+            _,writer=await asyncio.open_connection(sock=sock,ssl=context,
+                server_hostname=credentials['tunnel_host'],ssl_handshake_timeout=5)
+        except BaseException:
+            sock.close()
+            raise
     writer.close()
     await asyncio.wait_for(writer.wait_closed(),timeout=3)
 

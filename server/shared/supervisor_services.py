@@ -2,7 +2,8 @@
 from dataclasses import dataclass, field
 import json
 import re
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientTimeout
+from shared.dns import session as ClientSession
 
 
 @dataclass(frozen=True)

@@ -2,22 +2,82 @@
 import asyncio
 import hashlib
 import json
+import os
 import secrets
+import socket
 import threading
 import time
+import types
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
+import aiohappyeyeballs
 
 from shared.discovery import namespace, discovery_payloads, state_payload
 from shared.files import atomic_write
 from shared.mqtt_outbox import MqttOutbox
+from shared.dns import getaddrinfo
 
 ACK_TIMEOUT=30
 CONNECT_TIMEOUT=60
 STOP_TIMEOUT=2
 MANIFEST_COUNT=10000
 MANIFEST_BYTES=1024*1024
+_workers={}
+_workers_lock=threading.Lock()
+_WORKER_LIMIT=8
+
+
+def _worker_available(key, worker=None):
+    # Retain ownership across bridge/event-loop recreation. Only is_alive=False
+    # proves retirement; a worker's finally block still runs on that worker.
+    with _workers_lock:
+        for identity, previous in tuple(_workers.items()):
+            if not previous.is_alive(): del _workers[identity]
+        if key in _workers or len(_workers)>=_WORKER_LIMIT: return False
+        if worker is not None:
+            _workers[key]=worker
+            try: worker.start()
+            except BaseException:
+                del _workers[key]
+                raise
+        return True
+
+
+def _numeric_connection(client, addresses):
+    # Paho 2.1.0's sole TCP-dial hook; _host stays unchanged for its normal
+    # _ssl_wrap_socket SNI, CA and hostname checks. Supervisor MQTT is direct;
+    # reject unsupported proxy intent instead of silently bypassing it. Do not
+    # call Paho _get_proxy: urllib proxy_bypass may itself perform OS DNS.
+    if (client._proxy or any(name.lower()=='mqtt_proxy' and value for name,value in os.environ.items()) or
+            (mqtt.socks is not None and mqtt.socks.get_default_proxy())):
+        raise OSError('MQTT proxy unsupported')
+    def create(address):
+        family,kind,proto,_,_=address
+        sock=socket.socket(family,kind,proto)
+        try:
+            if client._bind_address or client._bind_port:
+                bind=client._bind_address or ('0.0.0.0' if family==socket.AF_INET else '::')
+                socket.inet_pton(family,bind)  # Numeric bind only; never implicit DNS.
+                sock.bind((bind,client._bind_port))
+            return sock
+        except BaseException:
+            sock.close()
+            raise
+    async def dial():
+        async with asyncio.timeout(client._connect_timeout):
+            return await aiohappyeyeballs.start_connection(addresses,
+                happy_eyeballs_delay=.25,interleave=1,socket_factory=create)
+    # Runs on the already owned Paho thread: no DNS, executor or extra thread.
+    # The library cancels/closes losing sockets before returning the winner.
+    try: sock=asyncio.run(dial())
+    except (OSError,RuntimeError): raise OSError('MQTT connection unavailable') from None
+    try:
+        sock.settimeout(client._connect_timeout)  # Paho expects a blocking dial.
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
 
 def fingerprint(payload): return hashlib.sha256(payload.encode()).digest()
@@ -139,15 +199,19 @@ class MqttBridge:
 
     async def _setup(self):
         if self._closed: return
-        if self._network and self._network.is_alive():
+        identity=(self.instance_id,self.role)
+        if not _worker_available(identity):
             self.state='stopping'; self.next_retry=time.monotonic()+5; return
         try:
             async with asyncio.timeout(10): service=await self.service_provider()
             if self._closed: return
             if service is None:
                 self.state='not_configured'; self.next_retry=time.monotonic()+30; return
+            addresses=await getaddrinfo(service.host,service.port)
+            if self._closed: return
             client=mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,client_id='hat-'+self.instance_id+'-'+self.role,
                 protocol=mqtt.MQTTv5,reconnect_on_failure=False)
+            client._create_socket_connection=types.MethodType(lambda current:_numeric_connection(current,addresses),client)
             client.max_queued_messages_set(256)
             client.max_inflight_messages_set(20)
             client.connect_timeout=5
@@ -172,7 +236,9 @@ class MqttBridge:
                     self._enqueue(('connection',client,False))
             self._network=threading.Thread(target=network,name='ha-tunnel-mqtt',daemon=True)
             self.state='connecting'; self.next_retry=time.monotonic()+CONNECT_TIMEOUT
-            self._network.start()
+            if not _worker_available(identity,self._network):
+                self.client=None; self.outbox.bind(None)
+                self.state='stopping'; self.next_retry=time.monotonic()+5
         except Exception as error:
             if getattr(self,'diagnostics',None): self.diagnostics.failure('service_error',error,component='mqtt',fatal=False)
             self.state='service_error'; self.next_retry=time.monotonic()+30

@@ -57,7 +57,8 @@ async def test_private_dns_never_contacted(monkeypatch,network):
 
 async def test_dns_actual_address_validation(monkeypatch):
     import socket
-    monkeypatch.setattr(socket,'getaddrinfo',lambda *args:[(socket.AF_INET,socket.SOCK_STREAM,6,'',('192.168.1.1',443))])
+    async def lookup(*args): return [(socket.AF_INET,socket.SOCK_STREAM,6,'',('192.168.1.1',443))]
+    monkeypatch.setattr(checks,'getaddrinfo',lookup)
     with pytest.raises(ValueError,match='Nonpublic'): await checks.public_addresses('tunnel.example.org')
 
 

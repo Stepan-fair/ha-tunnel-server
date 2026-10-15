@@ -247,7 +247,7 @@ async def test_delayed_mqtt_service_retries_existing_worker_without_restart(monk
     ready=False; connected=asyncio.Event()
     async def provider():
         if not ready: raise ValueError('Supervisor late')
-        return MqttService('broker',1883,'user','test-secret',False)
+        return MqttService('127.0.0.1',1883,'user','test-secret',False)
     class Client:
         def __init__(self,*a,**kw): pass
         def username_pw_set(self,*a): pass

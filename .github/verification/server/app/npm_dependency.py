@@ -29,7 +29,8 @@ class VerifiedNpmSnapshot:
         return 0<=time.monotonic()-self.verified_at<PROOF_TTL
 
 async def resolve_npm(host):
-    rows=await asyncio.get_running_loop().getaddrinfo(host,None,family=socket.AF_INET,type=socket.SOCK_STREAM)
+    from shared.dns import getaddrinfo
+    rows=await getaddrinfo(host,None,family=socket.AF_INET)
     return [row[4][0] for row in rows]
 
 def _address(value):

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import ssl
+from itertools import permutations
 
 import pytest
 from aiohttp import web
@@ -99,6 +100,42 @@ async def test_17280_failed_cycles_recover_without_new_code(configured,monkeypat
     assert ctrl.runtime.starts==1 and ctrl.credentials==credentials
 
 
+@pytest.mark.parametrize('order',list(permutations(('core','api','tunnel'))))
+@pytest.mark.parametrize('permission',['allowed','paused','revoked','expired','clock_error'])
+async def test_dependency_return_order_preserves_identity_and_denials(configured,monkeypatch,order,permission):
+    # State-machine fault injection complements actual Linux transport tests;
+    # no simulated physical power cycle is claimed here.
+    ctrl,credentials=configured;available=set();edits=[]
+    ctrl.runtime.running=False
+    before=(ctrl.directory/'credentials.json').read_bytes()
+    async def ready():
+        if 'core' not in available:raise OSError('Core unavailable')
+        ctrl.ha_wait_state=None
+    class Status:
+        async def fetch(self,*args):
+            if 'api' not in available:raise OSError('API unavailable')
+            return {'client_id':credentials['client_id'],'access_state':permission,'revision':0,'generation':0}
+    async def tls(*args):
+        if 'tunnel' not in available:raise OSError('Tunnel unavailable')
+    async def published(*args):return 'tunnel' in available
+    async def forbidden(*args,**kwargs):edits.append(True);raise AssertionError('Automatic configuration edit')
+    ctrl.status_client=Status();ctrl.status_origin=credentials['server_url']
+    monkeypatch.setattr(ctrl,'_ready',ready)
+    monkeypatch.setattr(controller_module,'verify_tunnel_tls',tls)
+    monkeypatch.setattr(controller_module,'proxy_running',published)
+    monkeypatch.setattr(controller_module,'configure_http',forbidden)
+    monkeypatch.setattr(controller_module,'enroll',forbidden)
+    await ctrl.resume()
+    for dependency in order:
+        available.add(dependency)
+        for _ in range(3):await ctrl.monitor_once()
+        if len(available)<3:assert ctrl.state!='connected'
+    if permission=='allowed':assert ctrl.state=='connected' and ctrl.runtime.running
+    else:assert ctrl.state==permission and not ctrl.runtime.running
+    assert not edits and ctrl.credentials==credentials
+    assert (ctrl.directory/'credentials.json').read_bytes()==before
+
+
 async def test_certificate_failure_stops_tunnel_but_recovers_after_trust_is_valid(configured,monkeypatch):
     ctrl,credentials=configured
     class Status:
@@ -152,11 +189,11 @@ def v2_environment(tmp_path,monkeypatch):
     server_ssl=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); server_ssl.load_cert_chain(pki.cert,pki.key)
     client_ssl=ssl.create_default_context(cafile=pki.ca)
     address={}
-    original_connection=controller_module.asyncio.open_connection
-    async def tunnel_connection(host,port,**kwargs):
+    from shared.dns import getaddrinfo
+    async def tunnel_addresses(host,port,**kwargs):
         assert host=='tunnel.example.org' and port==7000
-        return await original_connection('127.0.0.1',address['port'],**kwargs)
-    monkeypatch.setattr(controller_module.asyncio,'open_connection',tunnel_connection)
+        return await getaddrinfo('127.0.0.1',address['port'],**kwargs)
+    monkeypatch.setattr(controller_module,'getaddrinfo',tunnel_addresses)
     original=aiohttp.ClientSession
     def session(**kwargs):
         return original(headers={'X-Forwarded-Proto':'https'},connector=aiohttp.TCPConnector(ssl=client_ssl,resolver=LocalResolver(address)),**kwargs)

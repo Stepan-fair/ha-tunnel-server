@@ -286,10 +286,13 @@ class ClientRelay:
     async def close(self):
         self.closing = True
         if self.server:
-            self.server.close(); await self.server.wait_closed()
+            self.server.close()
         if self.flusher:
             self.flusher.cancel(); await asyncio.gather(self.flusher, return_exceptions=True)
         for cid in list(self.streams): await self.disconnect(cid)
         for task in tuple(self.tasks): task.cancel()
         await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+        # Python's Server.wait_closed waits for accepted transports as well.
+        # Close/cancel their owners first, including an idle WebSocket peer.
+        if self.server: await self.server.wait_closed()
         await self.flush()

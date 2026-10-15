@@ -67,9 +67,11 @@ def format_billing(snapshot,*,stale=False):
         return 'до '+datetime.fromtimestamp(value-1,zone).strftime('%d.%m.%Y')+' включительно'
     zero=data['price_kopecks']==0 and data['mode']=='monthly'
     paid='Бессрочно' if zero else 'Прежний ручной срок' if data['mode']=='legacy' else inclusive(data['paid_until'])
+    unavailable={'pending':'После подключения клиента','revoked':'Доступ отозван',
+        'clock_error':'Ожидает проверки времени сервера'}.get(data['pause_reason'],'Прогноз временно недоступен')
     funds='Бессрочно' if zero else ('За пределами календарного расчёта' if data['projection_limited'] else
         'Недостаточно на один месяц' if data['projection_kind']=='insufficient' else
-        'После подключения клиента' if data['projection_kind']=='unavailable' else
+        unavailable if data['projection_kind']=='unavailable' else
         'Прежний ручной срок' if data['projection_kind']=='legacy' else inclusive(data['funds_until']))
     if data['projection_kind']=='resume_today' and data['funds_until'] is not None: funds+=' при запуске сегодня'
     if data['pause_reason']=='manual' and not zero: funds+=' при возобновлении сейчас'

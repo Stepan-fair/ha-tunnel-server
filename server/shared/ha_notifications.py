@@ -6,7 +6,8 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 
-from aiohttp import ClientSession, ClientTimeout, ClientWSTimeout, DummyCookieJar, TraceConfig, WSMsgType
+from aiohttp import ClientTimeout, ClientWSTimeout, DummyCookieJar, TraceConfig, WSMsgType
+from shared.dns import session as ClientSession
 from shared.notification_state import SERVICE, unique_pairs
 
 CORE_API = 'http://supervisor/core/api'
@@ -63,8 +64,7 @@ class HaNotifications:
                 params.response.close()
                 raise ValueError('Core redirects forbidden')
             trace.on_request_redirect.append(reject_redirect)
-            # Reuse the connector across cancelled handshakes: aiohttp single-
-            # flights DNS here even if the underlying OS lookup outlives timeout.
+            # Connection reuse is local; DNS child ownership survives this session.
             self.ws_session=ClientSession(timeout=ClientTimeout(total=5),trust_env=False,
                 cookie_jar=DummyCookieJar(),trace_configs=[trace])
         yield self.ws_session

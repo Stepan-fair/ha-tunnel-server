@@ -1,5 +1,5 @@
 import time
-from aiohttp import BasicAuth
+from aiohttp import encode_basic_auth
 from aiohttp.test_utils import TestClient, TestServer
 from server.app.store import Store
 from server.app.identity import Authority
@@ -13,22 +13,21 @@ async def test_paused_status_allowed_token_denied(tmp_path):
     now = int(time.time())
     c = store.redeem(store.issue('alpha', now).code, now)
     options = {'trusted_proxy_ips': ['127.0.0.1']}
-    headers = {'X-Forwarded-Proto': 'https'}
-    auth = BasicAuth(c.client_id, c.secret)
+    headers = {'X-Forwarded-Proto': 'https','Authorization':encode_basic_auth(c.client_id,c.secret)}
     async with TestClient(TestServer(make_public_app(store, authority, options))) as client:
-        response = await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': ['access-v1', 'telemetry-v1']})
+        response = await client.post('/v1/client/status', headers=headers, json={'capabilities': ['access-v1', 'telemetry-v1']})
         assert response.status == 200
         assert (await response.json())['access_state'] == 'allowed'
         store.apply_access(c.client_id, 'pause', 'pause', 0, now)
-        response = await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': ['access-v1']})
+        response = await client.post('/v1/client/status', headers=headers, json={'capabilities': ['access-v1']})
         assert response.status == 200 and (await response.json())['access_state'] == 'paused'
-        assert (await client.post('/v1/token', headers=headers, auth=auth, data={'grant_type': 'client_credentials'})).status == 401
+        assert (await client.post('/v1/token', headers=headers, data={'grant_type': 'client_credentials'})).status == 401
         store.apply_access(c.client_id, 'start', 'start', 1, now)
-        assert (await client.post('/v1/token', headers=headers, auth=auth, data={'grant_type': 'client_credentials'})).status == 200
+        assert (await client.post('/v1/token', headers=headers, data={'grant_type': 'client_credentials'})).status == 200
         store.revoke(c.client_id)
-        assert (await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': []})).status == 200
+        assert (await client.post('/v1/client/status', headers=headers, json={'capabilities': []})).status == 200
         replacement = store.redeem(store.reissue(c.client_id, now).code, now, binding=(c.client_id,c.secret))
-        assert (await client.post('/v1/client/status', headers=headers, auth=auth, json={'capabilities': []})).status == 401
+        assert (await client.post('/v1/client/status', headers=headers, json={'capabilities': []})).status == 401
 
 
 def test_rebind_invalidates_old_generation(tmp_path):

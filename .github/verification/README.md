@@ -71,3 +71,7 @@ docker build --platform linux/amd64 -t ha-tunnel-client:test dist/repository-0.2
 Сборку arm64 нужно выполнить на arm64-builder либо настроенном Docker Buildx. Docker test image использует только loopback; `--network none` достаточен после загрузки зависимостей на стадии сборки.
 
 Публичный API регистрации работает только за доверенным NPM. Служебная политика FRP и локальная панель состояния frpc слушают loopback. Панели приложений доступны через HA Ingress с проверкой пользователя и CSRF. Подробнее: [SECURITY](SECURITY.md).
+
+## Обновление 0.5.0
+
+[Порядок обновления и миграции](docs/UPGRADE_050.md), [приёмка](docs/ACCEPTANCE.md), [полный разбор находок безопасности](docs/SECURITY_ASSESSMENT_050.md). Server обновляется первым; схемы состояния мигрируют только вперёд.

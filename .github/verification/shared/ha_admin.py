@@ -1,13 +1,14 @@
 """Verify a trusted Ingress identity against Home Assistant's actual users."""
 import aiohttp
 import asyncio
+from shared.dns import session
 
 
 async def verified_admin(user_id,supervisor_token):
     if not isinstance(user_id,str) or not user_id or len(user_id)>128 or not supervisor_token: return False
     try:
-        async with asyncio.timeout(5), aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5),trust_env=False) as session:
-            async with session.ws_connect('http://supervisor/core/websocket',max_msg_size=65536) as ws:
+        async with asyncio.timeout(5), session(timeout=aiohttp.ClientTimeout(total=5),trust_env=False) as client:
+            async with client.ws_connect('http://supervisor/core/websocket',max_msg_size=65536) as ws:
                 if (await ws.receive_json())['type']!='auth_required': return False
                 await ws.send_json({'type':'auth','access_token':supervisor_token})
                 if (await ws.receive_json())['type']!='auth_ok': return False

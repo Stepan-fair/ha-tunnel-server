@@ -264,6 +264,29 @@ async def test_blocked_connect_close_is_bounded_and_late_result_never_revives(mo
     finally: release.set(); await bridge.close()
 
 
+def test_bridge_recreation_across_event_loops_bounds_actual_dns_threads(monkeypatch):
+    import socket
+    import shared.mqtt as module
+    release=threading.Event();entered=[];bridges=[]
+    def blocked(*args,**kwargs):
+        entered.append(threading.current_thread())
+        release.wait(5)
+        raise OSError('synthetic DNS unavailable')
+    monkeypatch.setattr(socket,'getaddrinfo',blocked)
+    monkeypatch.setattr(module,'STOP_TIMEOUT',.01)
+    async def service():return MqttService('blocked.invalid',1883,'synthetic','synthetic',False)
+    async def cycle():
+        bridge=MqttBridge('a'*32,'server',service,lambda:[]);bridges.append(bridge)
+        await bridge.start();await asyncio.sleep(.04);await bridge.close()
+    try:
+        for _ in range(3):asyncio.run(cycle())
+        assert len(entered)<=1, 'A new event loop must not detach a blocked DNS worker'
+    finally:
+        release.set()
+        for bridge in bridges:
+            if bridge._network:bridge._network.join(1)
+
+
 def test_pending_count_and_bytes_include_sent_and_superseding_payloads():
     from shared.mqtt_outbox import MqttOutbox
     outbox=MqttOutbox(); broker=Broker(); outbox.bind(broker)

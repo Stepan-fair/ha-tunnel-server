@@ -45,7 +45,7 @@ from shared.notification_state import NotificationState
 from shared.notifications import NotificationWorker,server_snapshots
 
 HEALTH_PATH=Path('/tmp/ha-tunnel-health')
-SERVER_VERSION='0.4.3'
+SERVER_VERSION='0.5.0'
 
 
 def phase(name,component='server'):

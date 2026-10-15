@@ -24,6 +24,8 @@ def package(output,*,component=None):
         'docs/DEPLOYMENT.md','docs/SERVER_INSTALL.md','docs/CLIENT_INSTALL.md')
     for filename in filenames:
         if (ROOT/filename).exists(): copy(ROOT/filename,output/filename)
+    for name in ('SECURITY_ASSESSMENT_050.md','SECURITY_FINDINGS_050.csv','UPGRADE_050.md'):
+        copy(ROOT/'docs'/name,output/'docs'/name)
     if component:
         url='https://github.com/Stepan-fair/ha-tunnel-'+component
         (output/'repository.yaml').write_text(f'name: HA Tunnel {component.title()}\nurl: {url}\nmaintainer: Stepan-fair\n',encoding='utf-8')

@@ -1,6 +1,7 @@
 """TLS-verified, bounded status polling independent of tunnel permission."""
 import json
-from aiohttp import ClientSession, ClientTimeout, TCPConnector, DummyCookieJar, encode_basic_auth
+from aiohttp import ClientSession, ClientTimeout, DummyCookieJar, encode_basic_auth
+from shared.dns import connector
 from shared.validation import origin
 from shared.telemetry import parse_telemetry
 from shared.billing_status import validate_billing
@@ -46,7 +47,7 @@ class ClientStatusClient:
             # Polling is every 15 seconds. Keep the verified connection longer
             # than that, with a small bounded pool and no ambient cookies/auth.
             self.session=ClientSession(timeout=ClientTimeout(total=10), trust_env=False,
-                connector=TCPConnector(limit=2,limit_per_host=2,keepalive_timeout=45),
+                connector=connector(limit=2,limit_per_host=2,keepalive_timeout=45),
                 cookie_jar=DummyCookieJar())
         async with self.session.post(self.server_url+'/v1/client/status', allow_redirects=False,
                 headers={'Authorization':encode_basic_auth(client_id,secret)},

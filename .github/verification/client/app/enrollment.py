@@ -2,7 +2,8 @@ import json
 import re
 from urllib.parse import urlsplit
 
-from aiohttp import ClientSession, ClientTimeout, encode_basic_auth
+from aiohttp import ClientTimeout, encode_basic_auth
+from shared.dns import session as ClientSession
 from cryptography import x509
 from cryptography.exceptions import UnsupportedAlgorithm
 from shared.protocol import Invitation
