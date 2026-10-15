@@ -26,6 +26,7 @@ from shared.runtime import FrpRuntime
 from server.app.policy import authorize
 from server.app.relay import ClientRelay
 from server.app.telemetry import TelemetryService
+from tests.frp_socket_evidence import ControlEvidence,ReservationClock,established_sockets,runtime_process_nonce
 
 pytestmark = pytest.mark.skipif(sys.platform != 'linux' or not FRPS or not FRPC,
     reason='Requires actual pinned Linux FRP binaries; Windows skips are not acceptance')
@@ -242,21 +243,6 @@ async def test_real_registration_rejected_after_allowed_callback_is_not_ha_proof
             await a[1].stop(); await b[1].stop()
 
 
-def control_socket_count(pid,port):
-    """Actual established server-side control TCPs; no work connections in this test."""
-    inodes=set()
-    for fd in Path(f'/proc/{pid}/fd').iterdir():
-        try: link=os.readlink(fd)
-        except FileNotFoundError: continue
-        if link.startswith('socket:['): inodes.add(link[8:-1])
-    count=0
-    for line in Path(f'/proc/{pid}/net/tcp').read_text().splitlines()[1:]:
-        fields=line.split()
-        if int(fields[1].split(':')[1],16)==port and fields[3]=='01' and fields[9] in inodes:
-            count+=1
-    return count
-
-
 async def test_real_reservation_churn_has_one_control_socket(environment,tmp_path,monkeypatch,record_testsuite_property):
     store,authority,server,plugin,pki,clients,session,url,port=environment
     c,_,config=clients[0]
@@ -277,22 +263,36 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
                 await asyncio.sleep(.1)
     calls=[]
     operations=Counter()
+    evidence=ControlEvidence()
+    clock=ReservationClock(asyncio.get_running_loop().time)
+    store.admission.clock=clock
     def no_activity(op,content,*args):
+        if op=='Login': clock.before_login(content.get('metas',{}).get('ha_tunnel_process'))
+        if op=='NewWorkConn':
+            # Pinned FRP RegisterWorkConn looks up a current RUNNING control
+            # before this hook (server/service.go:808-825, control.go:252-264).
+            # Its server-owned epoch therefore proves Login auth/activation,
+            # even though this work connection is still rejected below.
+            evidence.activate(content['user']['metas']['ha_tunnel_session'])
         if op in ('Ping','NewWorkConn','NewProxy'):
             operations[(op,'rejected')]+=1
             return {'reject':True,'reject_reason':'isolated test: keep reservation unconfirmed'}
         result=authorize(op,content,*args)
         operations[(op,'rejected' if result['reject'] else 'accepted')]+=1
-        if op=='Login' and not result['reject']: calls.append(deepcopy(result['content']))
+        if op=='Login' and not result['reject']:
+            # client_address is supplied by frps from RemoteAddr, not by frpc.
+            # Capture the exact inode/endpoints while frps awaits this callback.
+            evidence.accept(content['client_address'],result['content']['metas']['ha_tunnel_session'],
+                            content['metas']['ha_tunnel_process'],established_sockets(server_pid,port))
+            calls.append(deepcopy(result['content']))  # Bounded by evidence.max_logins.
         return result
     monkeypatch.setattr('server.app.web.authorize',no_activity)
-    offset=[0.0]
-    store.admission.clock=lambda:asyncio.get_running_loop().time()+offset[0]
     runtimes=[]
     samples=[]
+    observations=[]
+    expected_epoch=expected_nonce=None
     try:
         for i in range(8):
-            count=len(calls)
             candidate=deepcopy(config)
             candidate['transport']['tcpMux']=False
             # FRP v0.71.0 heartbeatWorker/BackoffUntil sends its first Ping
@@ -304,16 +304,30 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
             candidate['loginFailExit']=True
             runtime=ClientRuntime(FRPC,tmp_path/f'reservation-{i}.json')
             runtimes.append(runtime)
+            if i:
+                # Native old processes retry even with loginFailExit (FRP
+                # client/service.go:239-264). Expiring before startup lets an
+                # old retry steal the new reservation. Inject expiry atomically
+                # with this process's Login instead; all policy calls stay real.
+                # start first writes a nonce-less config for verify. During
+                # that phase old callbacks still reach policy without expiry;
+                # _launch adds the nonce before spawning the new frpc.
+                clock.arm(lambda:runtime_process_nonce(runtime.path))
             await runtime.start(candidate)
-            await eventually(lambda:len(calls)>count)
-            await asyncio.sleep(.5)  # Plugin acceptance precedes FRP control activation.
-            await eventually(lambda:control_socket_count(server_pid,port)==1)
+            # Correlate to this launched OS process, never a predecessor retry.
+            expected_nonce=json.loads(runtime.path.read_text())['metadatas']['ha_tunnel_process']
+            await eventually(lambda:evidence.latest(expected_nonce) is not None)
+            expected_epoch=evidence.latest(expected_nonce).epoch
+            await eventually(lambda:evidence.ready(expected_epoch,expected_nonce,
+                                                    established_sockets(server_pid,port)))
             for _ in range(3):
                 await asyncio.sleep(.2)
-                assert control_socket_count(server_pid,port)==1
-            samples.append(control_socket_count(server_pid,port))
+                sockets=established_sockets(server_pid,port)
+                observations.append(evidence.sample(expected_epoch,expected_nonce,sockets))
+                assert evidence.require_current(expected_epoch,expected_nonce,sockets)==1
+            samples.append(evidence.require_current(expected_epoch,expected_nonce,
+                                                     established_sockets(server_pid,port)))
             assert store.admission.counts()=={'owners':1,'reservations':1,'active':0}
-            offset[0]+=16
         assert len({call['run_id'] for call in calls})==1
         assert all(call['client_id']==c.client_id for call in calls)
         assert len({call['metas']['ha_tunnel_session'] for call in calls})==len(calls)
@@ -325,13 +339,15 @@ async def test_real_reservation_churn_has_one_control_socket(environment,tmp_pat
         # Only bounded numeric state: never dump FRP config, Login payloads,
         # tokens, process nonces, RunIDs, session epochs or raw child output.
         try:
-            sockets={'all':socket_count(server_pid),'control':control_socket_count(server_pid,port)}
-        except OSError:
+            sockets=evidence.sample(expected_epoch,expected_nonce,established_sockets(server_pid,port))
+            sockets['all_fds']=socket_count(server_pid)
+        except (OSError,ValueError):
             sockets={'unavailable':True}
         print('reservation_churn_diagnostic',json.dumps({
             'iteration':len(samples),'samples':samples,
             'server_pid':server_pid,'server_status':server.status(),
             'sockets':sockets,
+            'observations':observations,'accepted_socket_history':len(evidence.history),
             'client_statuses':[runtime.status() for runtime in runtimes],
             'accepted_logins':len(calls),'admission':store.admission.counts(),
             'distinct_epochs':len({call['metas']['ha_tunnel_session'] for call in calls}),

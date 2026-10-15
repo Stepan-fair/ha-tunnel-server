@@ -52,6 +52,10 @@ def check(candidate, component, output):
                 require(stream.read(4) == b'\x7fELF', 'Expected production ELF binary')
                 stream.seek(0)
                 binary_digest = hash_stream(stream)
+            # Keep the host parent private (0700). A capability-free scanner
+            # cannot traverse that runner-owned directory; bind only the file.
+            # Normalize permissions on this disposable copy, never the image.
+            binary.chmod(0o444)
             with (output / (binary_name + '-vulncheck.txt')).open('w', encoding='utf-8') as report:
                 # Text mode retains nonzero exit for reachable vulnerabilities.
                 subprocess.run([
@@ -60,7 +64,8 @@ def check(candidate, component, output):
                     '-e', 'GOTOOLCHAIN=local', '-e', 'GOMAXPROCS=2',
                     '-e', 'GOPROXY=https://proxy.golang.org', '-e', 'GOSUMDB=sum.golang.org',
                     '-e', 'GOVULNDB=' + DATABASE,
-                    '-v', str(Path(directory).resolve()) + ':/candidate:ro', GO_IMAGE,
+                    '--mount', 'type=bind,src=' + str(binary.resolve()) + ',dst=/candidate/' + binary_name + ',readonly',
+                    GO_IMAGE,
                     'go', 'run', CHECKER, '-mode=binary', '-db', DATABASE, '-show', 'verbose', '/candidate/' + binary_name,
                 ], check=True, stdout=report, stderr=subprocess.STDOUT, timeout=600)
         finally:
