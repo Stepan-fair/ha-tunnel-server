@@ -252,3 +252,60 @@ def test_only_tag_publisher_has_package_write_and_reuses_candidate_artifacts(tmp
     assert not any(step.get('uses', '').startswith('docker/build-push-action@') for step in publisher['steps'])
     # The executable publish CLI already tests revalidation before any copy.
     assert any('oci_candidate.py publish' in step.get('run', '') for step in publisher['steps'])
+
+def test_failed_verification_preserves_only_bounded_existing_original_archive(tmp_path):
+    """Run the generated diagnostic eligibility script after an actual gate failure."""
+    import os
+    import subprocess
+    import sys
+    from tools.release_repository import release_repository
+    from test_oci_candidate import fixture, REVISION, VERSION
+    output = tmp_path / 'release'
+    release_repository('server', output)
+    workflow = YAML(typ='safe').load((output/'.github/workflows/build.yml').read_text())
+    steps = workflow['jobs']['build']['steps']
+    guards = [step for step in steps if step.get('id') == 'candidate-archive']
+    assert len(guards) == 1, 'Failed candidate archive has no bounded diagnostic eligibility step'
+    guard = guards[0]
+    upload = next(step for step in steps if step.get('with', {}).get('path') == 'candidate.tar')
+    assert guard['if'] == 'always()'
+    assert upload['if'] == "always() && steps.candidate-archive.outputs.present == 'true'"
+    assert upload['with']['retention-days'] == 7
+    assert upload['with']['compression-level'] == 0
+    script = guard['run'].removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+    archive, *_ = fixture(output, revision='b' * 40)
+    before = archive.read_bytes()
+    rejected = subprocess.run([sys.executable, str(output/'.github/verification/tools/oci_candidate.py'),
+        'verify', '--archive', str(archive), '--revision', REVISION, '--version', VERSION,
+        '--record', str(output/'candidate.json')], capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert not (output/'candidate.json').exists()
+    result_file = output/'diagnostic-output'
+    def eligible():
+        result_file.unlink(missing_ok=True)
+        result = subprocess.run([sys.executable, '-c', script], cwd=output,
+            env={**os.environ, 'GITHUB_OUTPUT': str(result_file)}, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return result_file.read_text()
+    assert eligible() == 'present=true\n'
+    assert archive.read_bytes() == before  # upload original, without rewrite or bypass
+    archive.unlink()
+    assert eligible() == 'present=false\n'  # pre-build failure must not mask original failure
+    archive.mkdir()
+    assert eligible() == 'present=false\n'
+    archive.rmdir()
+    archive.write_bytes(b'')
+    assert eligible() == 'present=false\n'
+    # Exercise oversized stat without allocating an 8GiB file.
+    import stat as stat_module
+    oversized = """from types import SimpleNamespace
+from pathlib import Path
+Path.lstat = lambda self: SimpleNamespace(st_mode=%d, st_size=8*1024**3+1)
+""" % stat_module.S_IFREG
+    result_file.unlink()
+    result = subprocess.run([sys.executable, '-c', oversized + script], cwd=output,
+        env={**os.environ, 'GITHUB_OUTPUT': str(result_file)}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result_file.read_text() == 'present=false\n'
+    assert workflow['jobs']['publish']['needs'] == 'build'
+    assert 'continue-on-error' not in next(step for step in steps if 'oci_candidate.py verify' in step.get('run', ''))

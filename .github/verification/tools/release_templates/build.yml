@@ -153,7 +153,25 @@ jobs:
             frp-evidence.txt
             go-evidence/
           if-no-files-found: warn
+      - name: Check bounded original OCI archive for diagnostic retention
+        id: candidate-archive
+        if: always()
+        run: |
+          python - <<'PY'
+          import os, stat
+          from pathlib import Path
+          try:
+              metadata = Path('candidate.tar').lstat()
+              present = stat.S_ISREG(metadata.st_mode) and 0 < metadata.st_size <= 8 * 1024**3
+          except OSError:
+              present = False
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('present=' + str(present).lower() + '\n')
+          if not present:
+              print('No bounded regular candidate archive available for diagnostics')
+          PY
       - name: Preserve original OCI archive with SBOM and provenance
+        if: always() && steps.candidate-archive.outputs.present == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: __ROLE__-${{ matrix.arch }}-oci-candidate
