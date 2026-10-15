@@ -2,13 +2,13 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import time
 import secrets
 import re
 
 from shared.files import atomic_write
+from shared.liveness import write_heartbeat
 from shared.service import listen,shutdown_event
-from shared.runtime import FrpRuntime
+from client.app.runtime import ClientRuntime
 from client.app.controller import Controller
 from client.app.supervisor import Supervisor
 from client.app.web import make_app
@@ -16,6 +16,16 @@ from shared.mqtt import MqttBridge
 from shared.supervisor_services import mqtt_service
 from shared.supervisor_client import SupervisorClient
 from shared.ha_admin import verified_admin
+from shared.ha_notifications import HaNotifications
+from shared.notification_state import NotificationState
+from shared.notifications import NotificationWorker,client_snapshots
+
+
+async def watch_client(controller,path='/tmp/ha-tunnel-health'):
+    while True:
+        await controller.monitor_once()
+        write_heartbeat(path)
+        await asyncio.sleep(15+secrets.randbelow(4000)/1000)
 
 
 async def main():
@@ -26,8 +36,10 @@ async def main():
         options['timezone']=info.get('timezone','UTC')
     except Exception: options['timezone']='UTC'
     async def admin(user): return await verified_admin(user,os.environ.get('SUPERVISOR_TOKEN'))
-    runtime=FrpRuntime('/usr/local/bin/frpc','/data/frpc.json')
+    runtime=ClientRuntime('/usr/local/bin/frpc','/data/frpc.json')
     controller=Controller('/data/state','/homeassistant/configuration.yaml',runtime,Supervisor())
+    notifications=NotificationWorker(NotificationState('/data/notifications.json','client'),
+        HaNotifications(os.environ.get('SUPERVISOR_TOKEN')),lambda:client_snapshots(controller))
     instance_path=Path('/data/state/instance_id')
     if not instance_path.exists(): atomic_write(instance_path,secrets.token_hex(16).encode())
     instance_id=instance_path.read_text().strip()
@@ -41,26 +53,22 @@ async def main():
     mqtt=MqttBridge(instance_id,'client',lambda:mqtt_service(os.environ.get('SUPERVISOR_TOKEN')),states,
         discovery_cache='/data/mqtt-discovery.json')
     controller.mqtt=mqtt
-    runner=await listen(make_app(controller,options,admin_check=admin),'0.0.0.0',18991)
-    async def watch():
-        while True:
-            await controller.monitor_once()
-            atomic_write('/tmp/ha-tunnel-health',str(int(time.time())).encode())
-            await asyncio.sleep(15)
+    runner=await listen(make_app(controller,options,admin_check=admin,notifications=notifications),'0.0.0.0',18991)
     tasks=[]
     try:
         await mqtt.start()
+        await notifications.start()
         if controller.credentials:
-            atomic_write('/data/state/ca.pem',controller.credentials['ca_pem'].encode())
             # Resume only when the existing config is already ready; never edit
             # or restart HA automatically just because this app was restarted.
             await controller.resume()
-        tasks=[asyncio.create_task(watch()),asyncio.create_task(shutdown_event())]
+        tasks=[asyncio.create_task(watch_client(controller)),asyncio.create_task(shutdown_event())]
         done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
         for task in done: task.result()
     finally:
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
+        await notifications.close()
         await runner.cleanup()
         await controller.close()
         await runtime.stop()

@@ -1,5 +1,7 @@
 """Transactional one-use enrollment; high-entropy secrets stored as SHA-256 hashes."""
 from contextlib import contextmanager
+from server.app.admission import Admission
+from server.app.administration import Administration
 from dataclasses import asdict
 from datetime import datetime, timezone as utc_timezone
 import hashlib
@@ -42,13 +44,12 @@ def _has_binding(db, row):
 
 
 class Store:
-    def __init__(self, path: Path, base_domain: str, reserved=(), server_host=None, *, clock=None, vault=None):
+    def __init__(self, path: Path, base_domain: str, reserved=(), server_host=None, *, clock=None, vault=None, administration=None):
+        self.administration = administration or Administration()
         self.clock = clock
         self.migrating=False
         self.vault = vault
-        self.live_proxies = {}
-        self.live_sessions = {}
-        self.login_sessions = {}
+        self.admission = Admission()
         self.path = Path(path)
         self.base_domain = validation.domain(base_domain)
         self.reserved = set(reserved) | {'tunnel', 'www', 'mail', 'smtp', 'ftp', 'admin', 'api'}
@@ -64,6 +65,9 @@ class Store:
               issued INTEGER NOT NULL, expires INTEGER NOT NULL, secret_hash TEXT,
               revoked INTEGER NOT NULL DEFAULT 0, last_seen INTEGER)''')
             migrate(db)
+            from server.app.binding import initialize
+            initialize(db)
+            db.execute("CREATE TABLE IF NOT EXISTS invitation_commands (client_id TEXT, command_id TEXT, request TEXT NOT NULL, code_hash TEXT NOT NULL, PRIMARY KEY(client_id,command_id))")
             db.execute('''INSERT OR IGNORE INTO server_metadata(name,value)
                 SELECT 'binding_claimed:' || c.id,'true' FROM clients c
                 WHERE c.secret_hash IS NOT NULL OR c.status_secret_hash IS NOT NULL OR c.revoked=1
@@ -72,6 +76,10 @@ class Store:
                 if row['domain'].split('.')[0] in self.reserved:
                     raise ValueError('Existing client conflicts with a reserved server name')
         self.path.chmod(0o600)
+
+    def ensure_mutation_allowed(self):
+        self.administration.ensure_mutation_allowed()
+        if self.migrating: raise ConflictError("Domain migration is in progress")
 
     def now(self):
         return self.clock.now() if hasattr(self.clock, 'now') else (self.clock or time.time)()
@@ -99,36 +107,52 @@ class Store:
         value = json.loads(entry['value'])
         return value == {'code_hash': row['code_hash'], 'generation': row['generation']}
 
-    def reissue(self, client_id, now, *, actor=None, transfer=False, expected_revision=None, confirm_domain=None):
+    def reissue(self, client_id, now, *, actor=None, transfer=False, expected_revision=None, confirm_domain=None, command_id=None, replace_pending=False):
         if self.migrating: raise ConflictError('Domain migration is in progress')
-        if type(transfer) is not bool: raise ValueError('Invalid invitation purpose')
+        if type(transfer) is not bool or type(replace_pending) is not bool: raise ValueError('Invalid invitation purpose')
+        if command_id is not None and (not isinstance(command_id,str) or not 1<=len(command_id)<=128): raise ValueError('Invalid command id')
+        if command_id is not None and type(expected_revision) is not int: raise ConflictError('Revision required')
+        request=json.dumps([transfer,expected_revision,confirm_domain,replace_pending],separators=(',',':'))
         code = secrets.token_urlsafe(32)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             row = db.execute('SELECT * FROM clients WHERE id=?', (client_id,)).fetchone()
             if row is None:
                 raise ValueError('Unknown client')
-            if transfer:
-                if confirm_domain != row['domain']: raise ValueError('Confirm the exact domain')
-                if type(expected_revision) is not int or expected_revision != row['revision']:
-                    raise ConflictError('Подключение изменилось. Обновите данные перед переносом.')
+            if command_id is not None:
+                previous=db.execute('SELECT * FROM invitation_commands WHERE client_id=? AND command_id=?',(client_id,command_id)).fetchone()
+                if previous:
+                    if previous['request']!=request: raise ValueError('Command identifier was reused')
+                    if previous['code_hash']!=row['code_hash'] or not row['issued']<=now<row['expires']:
+                        raise ConflictError('Приглашение заменено, использовано или истекло. Обновите данные.')
+                    return Enrollment(client_id,row['domain'],self._vault(db).open(client_id,row['code_ciphertext']),row['expires'],'transfer' if transfer else 'rebind')
+            if expected_revision is not None or transfer:
+                if type(expected_revision) is not int or expected_revision!=row['revision']:
+                    raise ConflictError('Подключение изменилось. Обновите данные.')
+            if transfer and confirm_domain!=row['domain']: raise ValueError('Confirm the exact domain')
+            if self._transfer_code(db,row) and row['issued']<=now<row['expires'] and not replace_pending:
+                raise ConflictError('Уже выдан код переноса. Явно подтвердите его замену.')
             cipher = self._vault(db).seal(client_id, code)
-            db.execute('UPDATE clients SET code_hash=?,code_ciphertext=?,issued=?,expires=? WHERE id=?',
+            db.execute('UPDATE clients SET code_hash=?,code_ciphertext=?,issued=?,expires=?,revision=revision+1 WHERE id=?',
                        (digest(code), cipher, now, now+900, client_id))
             name = 'invitation_transfer:'+client_id
             db.execute('DELETE FROM server_metadata WHERE name=?', (name,))
             if transfer:
                 db.execute('INSERT INTO server_metadata VALUES (?,?)', (name, json.dumps({'code_hash': digest(code), 'generation': row['generation']})))
+            if command_id is not None:
+                db.execute('INSERT INTO invitation_commands VALUES (?,?,?,?)',(client_id,command_id,request,digest(code)))
             append_event(db, action='transfer_code' if transfer else 'reissue', actor=actor, client_id=client_id, domain=row['domain'], at=now)
         return Enrollment(client_id, row['domain'], code, now+900, 'transfer' if transfer else 'rebind')
 
     def _snapshot(self, row, now):
         from server.app.subscription import billing_snapshot
-        reliable=not hasattr(self.clock,'reliable') or self.clock.reliable
+        reliable=(not hasattr(self.clock,'reliable') or self.clock.reliable) and not self.get_metadata('clock_hold:'+row['id'],False) and not (row['paid_from'] is not None and row['paid_from']>now)
         billing=billing_snapshot(row,now,reliable=reliable)
         monthly=row['billing_mode']!='legacy'
         deadline=(row['paid_until'] if row['price_kopecks']>0 else None) if monthly else row['deadline']
         expired=(row['price_kopecks']>0 and (deadline is None or row['paid_from'] is None or now<row['paid_from'] or now>=deadline)) if monthly else deadline is not None and now>=deadline
+        expired=bool(expired and reliable)
         clock_error = (row['price_kopecks']>0 if monthly else deadline is not None) and not reliable
         state = ('revoked' if row['revoked'] else 'pending' if not row['secret_hash'] else
                  'paused' if monthly and row['paused'] else 'clock_error' if monthly and clock_error else
@@ -168,6 +192,7 @@ class Store:
             db.execute('INSERT OR REPLACE INTO server_metadata VALUES (?,?)', (name, json.dumps(value)))
 
     def set_capabilities(self, client_id, capabilities):
+        self.ensure_mutation_allowed()
         if (not isinstance(capabilities, list) or len(capabilities) > 2 or
                 any(c not in ('access-v1', 'telemetry-v1') for c in capabilities)):
             raise ValueError('Invalid capabilities')
@@ -186,6 +211,7 @@ class Store:
         request = json.dumps([action, expected_revision, duration, timezone], sort_keys=True)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             previous = db.execute('SELECT * FROM access_commands WHERE client_id=? AND command_id=?', (client_id, command_id)).fetchone()
             if previous:
                 if previous['request'] != request:
@@ -195,6 +221,8 @@ class Store:
             if row is None:
                 raise ValueError('Unknown client')
             snap = self._snapshot(row, now)
+            if action in ('set_duration','start') and (action=='set_duration' or row['deadline'] is not None or row['price_kopecks']>0) and not getattr(self.clock,'reliable',True):
+                raise ConflictError('Wait for reliable server time')
             if row['billing_mode']=='monthly' and action in ('set_duration','permanent'):
                 raise ConflictError('Use subscription price and balance')
             if row['revision'] != expected_revision:
@@ -228,6 +256,7 @@ class Store:
             db.execute('INSERT INTO access_commands VALUES (?,?,?,?)', (client_id, command_id, request, json.dumps(result)))
             append_event(db, action=action, actor=actor, client_id=client_id, domain=row['domain'], at=now,
                          details={'deadline':result['deadline'], 'revision':result['revision'], 'timezone':result['timezone']})
+        if action in ('pause','revoke'): self.admission.remove(client_id)
         return result
 
     def reconcile_billing(self,db,row,now,*,fresh_start=False):
@@ -238,8 +267,10 @@ class Store:
         return BillingRepository(self)._reconcile(db,row,now,row['billing_timezone'],fresh_start=fresh_start)
 
     def record_expiry(self, client_id, now):
+        if not getattr(self.clock,'reliable',True) or self.get_metadata('clock_hold:'+client_id,False): return False
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             row = db.execute('SELECT * FROM clients WHERE id=?', (client_id,)).fetchone()
             if not row or row['revoked'] or row['deadline'] is None or now < row['deadline']: return False
             ident = f"expiry:{client_id}:{row['deadline']}"
@@ -251,11 +282,19 @@ class Store:
     def delete_revoked(self, client_id, expected_revision, *, actor=None):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             row=db.execute('SELECT * FROM clients WHERE id=?',(client_id,)).fetchone()
             if row is None: raise ValueError('Unknown client')
             if not row['revoked'] or type(expected_revision) is not int or row['revision']!=expected_revision:
                 raise ConflictError('Revoke the client and refresh before deleting it')
+            now=self.now()
+            if not getattr(self.clock,'reliable',True): raise ConflictError('Wait for reliable server time')
+            if self.get_metadata('clock_hold:'+client_id,False): raise ConflictError('Reconcile the held period before deleting it')
+            if row['balance_kopecks']!=0: raise ConflictError('Сначала урегулируйте ненулевой баланс явной финансовой командой.')
+            if row['paid_until'] is not None and row['paid_until']>now:
+                raise ConflictError('Действующий или будущий оплаченный период ещё не завершён.')
             append_event(db,action='delete',actor=actor,client_id=client_id,domain=row['domain'],at=self.now())
+            db.execute('DELETE FROM invitation_commands WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM access_commands WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM billing_commands WHERE client_id=?',(client_id,))
             db.execute('DELETE FROM availability_checkpoint WHERE client_id=?',(client_id,))
@@ -264,7 +303,7 @@ class Store:
             db.execute('DELETE FROM server_metadata WHERE name=?', ('binding_claimed:'+client_id,))
             for name in ('ha_available','frp_connected'):
                 db.execute('DELETE FROM server_metadata WHERE name=?',('audit:'+name+':'+client_id,))
-        for cache in (self.live_proxies,self.live_sessions,self.login_sessions): cache.pop(client_id,None)
+        self.admission.remove(client_id)
         return {'deleted':True,'client_id':client_id,'domain':row['domain']}
 
     def add_traffic(self, client_id, to_client, from_client):
@@ -295,6 +334,7 @@ class Store:
         try:
             with self.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
+                self.ensure_mutation_allowed()
                 old=db.execute('SELECT id,revoked FROM clients WHERE domain=?',(fqdn,)).fetchone()
                 if old and old['revoked']:
                     raise ConflictError('Restore this revoked client or delete it first',client_id=old['id'])
@@ -312,11 +352,14 @@ class Store:
         validation.token(code)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             row = db.execute('SELECT * FROM clients WHERE code_hash=?', (digest(code),)).fetchone()
             if row is None or not row['issued'] <= now < row['expires']:
                 raise ValueError('Invalid or expired connection code')
             if expected_client_id is not None and row['id'] != expected_client_id:
                 raise BoundDomainError('Код относится к другому подключению.', client_id=row['id'], reason='wrong_connection')
+            from server.app.binding import reserved
+            if reserved(db,row,now): raise ConflictError('Invitation reserved')
             bound = _has_binding(db,row)
             transfer = self._transfer_code(db, row)
             if bound and not transfer:
@@ -339,6 +382,7 @@ class Store:
             db.execute('INSERT OR REPLACE INTO server_metadata VALUES (?,?)', ('binding_claimed:'+row['id'],'true'))
             result = Credentials(row['id'], row['domain'], secret)
             append_event(db, action='transfer' if transfer else 'redeem', actor=actor or Actor('client'), client_id=row['id'], domain=row['domain'], at=now)
+        self.admission.remove(result.client_id)
         return result
 
     def authenticate(self, client_id: str, secret: str) -> Client | None:
@@ -372,6 +416,7 @@ class Store:
     def revoke(self, client_id: str, *, actor=None) -> None:
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.ensure_mutation_allowed()
             row = db.execute('SELECT domain FROM clients WHERE id=?', (client_id,)).fetchone()
             cursor = db.execute('UPDATE clients SET revoked=1,code_hash=NULL,code_ciphertext=NULL,secret_hash=NULL,revision=revision+1 WHERE id=?',
                                 (client_id,))
@@ -379,6 +424,8 @@ class Store:
                 raise ValueError('Unknown client')
             db.execute('DELETE FROM server_metadata WHERE name=?', ('invitation_transfer:'+client_id,))
             append_event(db, action='revoke', actor=actor, client_id=client_id, domain=row['domain'], at=self.now())
+
+        self.admission.remove(client_id)
 
     def seen(self, client_id: str, now: int) -> None:
         with self.connection() as db:
@@ -394,4 +441,9 @@ class Store:
 
     def list_clients(self) -> list[dict]:
         with self.connection() as db:
-            return [self._snapshot(row, self.now()) for row in db.execute('SELECT * FROM clients ORDER BY issued,id')]
+            result=[]
+            for row in db.execute('SELECT * FROM clients ORDER BY issued,id'):
+                now=self.now(); snap=self._snapshot(row,now)
+                snap['pending_transfer']=bool(row['code_hash'] and row['issued']<=now<row['expires'] and self._transfer_code(db,row))
+                result.append(snap)
+            return result

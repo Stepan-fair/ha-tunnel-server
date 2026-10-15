@@ -9,6 +9,7 @@ class AccessService:
     def __init__(self, store, relay, clock, *, diagnostics=None):
         self.store, self.relay, self.clock = store, relay, clock
         self.diagnostics=diagnostics
+        self.administration=store.administration
 
     def now(self): return self.clock.now() if hasattr(self.clock, 'now') else self.clock()
 
@@ -36,11 +37,14 @@ class AccessService:
         return result
 
     async def expire_once(self):
+        if self.administration.busy or self.store.migrating: return
         if getattr(self.store,'billing_available',lambda:True)():
             for client in self.store.list_clients():
                 async with self.relay.locks[client['client_id']]:
+                    if self.administration.busy or self.store.migrating: return
                     BillingRepository(self.store).reconcile(client['client_id'],self.now(),timezone=client['billing']['timezone'])
         for client in self.store.list_clients():
+            if self.administration.busy or self.store.migrating: return
             try: self.store.record_expiry(client['client_id'],self.now())
             except sqlite3.Error as exc:
                 if self.diagnostics: self.diagnostics.failure('storage_error',exc,component='storage',fatal=False)
@@ -52,5 +56,5 @@ class AccessService:
     async def delete_revoked(self, client_id, expected_revision, *, actor=None):
         async with self.relay.locks[client_id]:
             result=self.store.delete_revoked(client_id,expected_revision,actor=actor)
-        await self.relay.disconnect(client_id)
+        await self.relay.retire(client_id)
         return result

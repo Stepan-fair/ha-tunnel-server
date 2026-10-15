@@ -27,7 +27,7 @@ async def test_controller_retains_credentials_after_ha_error_and_never_publishes
     runtime=Runtime()
     controller=Controller(tmp_path/'state',config,runtime,Supervisor())
     await controller.connect(None)
-    assert controller.status()['state']=='error'
+    assert controller.status()['state']=='configuration_error'
     assert controller.status()['configured']
     assert not runtime.started
     assert 'x'*43 not in str(controller.status())

@@ -1,5 +1,6 @@
 """Encrypted portable state; restore only to an empty server, retaining rollback."""
 import base64
+import hashlib
 import json
 import math
 import os
@@ -10,7 +11,7 @@ import tempfile
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-from server.app.store import Store
+from server.app.store import Store, ConflictError
 from server.app.store import digest
 from server.app.migrations import EXTRA_COLUMNS, BILLING_COLUMNS
 from server.app.backup_billing import validate_subscription, restore_financial, restore_availability
@@ -24,7 +25,7 @@ from shared.validation import domain
 
 FILES=('identity.key','pki/ca.key','pki/ca.pem','pki/server.pem')
 COLUMNS=('id','domain','code_hash','issued','expires','secret_hash','revoked','last_seen')
-HEADER=b'HATB3'
+HEADER=b'HATB5'
 EXPORT_EVENT_LIMIT=100000
 EXPORT_RAW_LIMIT=8*1024*1024
 
@@ -41,6 +42,10 @@ def key(password,salt):
 
 def export_state(directory,store,password):
     directory=Path(directory)
+    store.ensure_mutation_allowed()
+    created_at=store.now()
+    if not getattr(store.clock,'reliable',True) or not math.isfinite(created_at) or created_at<0:
+        raise ValueError('Wait for reliable time before exporting a dated backup')
     with store.connection() as db:
         db.execute('BEGIN')
         rows=[dict(row) for row in db.execute('SELECT * FROM clients')]
@@ -61,17 +66,14 @@ def export_state(directory,store,password):
         for name,table in (('episodes','outage_episodes'),('entitlements','outage_entitlements')):
             if db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]>EXPORT_EVENT_LIMIT: raise BackupTooLarge('Availability history exceeds portable limit')
             availability[name]=[dict(row) for row in db.execute('SELECT * FROM '+table)]
-    financial=bool(availability['episodes'] or any(item['name'].startswith('service_') for item in metadata) or billing_operations or billing_commands or any(row['billing_mode']=='monthly' for row in rows))
-    header=b'HATB4' if financial else HEADER
-    if not financial:
-        rows=[{name:row[name] for name in COLUMNS+tuple(EXTRA_COLUMNS)} for row in rows]
+    header=HEADER
     for row in rows:
         if row['code_ciphertext'] is not None:
             row['code_ciphertext']=base64.b64encode(row['code_ciphertext']).decode()
     names=FILES+(('invitations.key',) if (directory/'invitations.key').exists() else ())
-    payload={'version':4 if financial else 3,'audit':audit,'base_domain':store.base_domain,'clients':rows,'metadata':metadata,'commands':commands,
+    payload={'version':5,'created_at':created_at,'audit':audit,'base_domain':store.base_domain,'clients':rows,'metadata':metadata,'commands':commands,
              'files':{name:base64.b64encode((directory/name).read_bytes()).decode() for name in names}}
-    if financial: payload.update(billing_operations=billing_operations,billing_commands=billing_commands,availability=availability)
+    payload.update(billing_operations=billing_operations,billing_commands=billing_commands,availability=availability)
     raw=json.dumps(payload,separators=(',',':')).encode()
     if len(raw)>EXPORT_RAW_LIMIT:
         raise BackupTooLarge('State exceeds portable backup limit')
@@ -126,6 +128,9 @@ def restore_metadata(db,payload):
             if not isinstance(value,str) or not re.fullmatch('[a-f0-9]{32}',value): raise ValueError()
         elif item['name'] in ('clock_anchor','service_last_healthy','service_shutdown_at'):
             if type(value) not in (int,float) or not math.isfinite(value) or value<0: raise ValueError()
+        elif item['name'].startswith('clock_'):
+            from server.app.clock_repair import validate_metadata
+            validate_metadata(db,item['name'],value)
         elif item['name']=='audit_running':
             if type(value) is not bool: raise ValueError()
         elif re.fullmatch(r'audit:(ha_available|frp_connected):[a-f0-9]{32}',item['name']):
@@ -165,25 +170,78 @@ def restore_audit(db, rows):
             tuple(row[name] if name!='details' else safe for name in ('id','at','action','source','user_id','client_id','domain','result','details','operation_id')))
 
 
-def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
-    directory=Path(directory)
-    current=Store(directory/'state.db',base_domain)
-    previous=directory.with_name(directory.name+'.pre-restore')
-    if current.list_clients() or previous.exists():
-        raise ValueError('Restore requires an empty server without a previous restore')
-    if not isinstance(blob,bytes) or not 49<=len(blob)<=10*1024*1024 or blob[:5] not in (b'HATB1',b'HATB2',HEADER,b'HATB4'):
+def read_backup(blob,password):
+    if not isinstance(blob,bytes) or not 49<=len(blob)<=10*1024*1024 or blob[:5] not in tuple(b'HATB'+str(v).encode() for v in range(1,6)):
         raise ValueError('Invalid backup')
     try:
         raw=AESGCM(key(password,blob[5:21])).decrypt(blob[21:33],blob[33:],blob[:5])
-        if len(raw)>8*1024*1024: raise ValueError()
+        if len(raw)>EXPORT_RAW_LIMIT: raise ValueError()
         payload=json.loads(raw)
         version=int(chr(blob[4]))
-        fields={'version','base_domain','clients','files'} | ({'metadata','commands'} if version>=2 else set()) | ({'audit'} if version>=3 else set()) | ({'billing_operations','billing_commands','availability'} if version>=4 else set())
-        if (set(payload)!=fields or payload['version']!=version or
-                payload['base_domain']!=base_domain or not set(FILES)<=set(payload['files']) or
-                not set(payload['files'])<=set(FILES+(('invitations.key',) if version>=2 else ())) or
-                not isinstance(payload['clients'],list)):
-            raise ValueError()
+        fields={'version','base_domain','clients','files'} | ({'metadata','commands'} if version>=2 else set()) | ({'audit'} if version>=3 else set()) | ({'billing_operations','billing_commands','availability'} if version>=4 else set()) | ({'created_at'} if version>=5 else set())
+        if not isinstance(payload,dict) or set(payload)!=fields or payload['version']!=version: raise ValueError()
+        if version>=5 and (type(payload['created_at']) not in (int,float) or not math.isfinite(payload['created_at']) or payload['created_at']<0): raise ValueError()
+        domain(payload['base_domain'])
+        if not set(FILES)<=set(payload['files']) or not set(payload['files'])<=set(FILES+(('invitations.key',) if version>=2 else ())): raise ValueError()
+        for field in ('clients','audit','billing_operations','billing_commands'):
+            if field in payload and not isinstance(payload[field],list): raise ValueError()
+        return payload
+    except Exception:
+        raise ValueError('Backup password or contents are invalid') from None
+
+
+def backup_preview(blob,password):
+    payload=read_backup(blob,password)
+    return dict(format='HATB'+str(payload['version']),created_at=payload.get('created_at'),
+        base_domain=payload['base_domain'],digest=hashlib.sha256(blob).hexdigest(),
+        inventory={field:len(payload.get(field,[])) for field in ('clients','billing_operations','billing_commands','audit')},
+        limitation='Восстанавливается только состояние снимка. Более поздние платежи отсутствуют; объединение с ними не выполняется.')
+
+
+def restore_revision(store,configuration=None):
+    # Runtime counters, periodic clock checkpoints and technical audit events are
+    # not financial authority. They must not invalidate an empty-server preview.
+    with store.connection() as db:
+        db.execute('BEGIN')
+        snapshot={table:[dict(row) for row in db.execute('SELECT * FROM '+table+' ORDER BY rowid')]
+            for table in ('clients','billing_operations','billing_commands','access_commands','invitation_commands')}
+        snapshot['metadata']=[dict(row) for row in db.execute("SELECT * FROM server_metadata WHERE name NOT LIKE 'audit%' AND name NOT IN ('clock_anchor','service_last_healthy','service_shutdown_at') ORDER BY name")]
+    return hashlib.sha256(json.dumps([configuration,snapshot],sort_keys=True,separators=(',',':'),default=lambda value:value.hex()).encode()).hexdigest()
+
+
+def require_empty_destination(store):
+    store.ensure_mutation_allowed()
+    with store.connection() as db:
+        for table in ('clients','billing_operations','billing_commands'):
+            if db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone():
+                raise ConflictError('Восстановление требует нового сервера без подключений и финансовой истории.')
+        marker=db.execute("SELECT value FROM server_metadata WHERE name='domain_migration'").fetchone()
+        if marker and json.loads(marker['value']).get('phase') not in ('aborted','committed'):
+            raise ConflictError('Сначала завершите миграцию.')
+
+
+def validate_restore_confirmation(store,blob,password,expected_digest,expected_revision,*,confirm_unknown_date=False,configuration=None):
+    require_empty_destination(store)
+    preview=backup_preview(blob,password)
+    if preview['digest']!=expected_digest or restore_revision(store,configuration)!=expected_revision:
+        raise ConflictError('Снимок или состояние сервера изменились. Повторите предпросмотр.')
+    if preview['created_at'] is None and confirm_unknown_date is not True:
+        raise ValueError('Подтвердите восстановление копии с неизвестной датой создания.')
+    return preview
+
+
+def restore_state(blob,password,directory,base_domain,hostname,reserved=(),*,current=None,expected_revision=None,configuration=None):
+    directory=Path(directory)
+    current=current or Store(directory/'state.db',base_domain)
+    require_empty_destination(current)
+    if expected_revision is not None and restore_revision(current,configuration)!=expected_revision: raise ConflictError('Preview is stale')
+    previous=directory.with_name(directory.name+'.pre-restore')
+    if previous.exists():
+        raise ValueError('Restore requires an empty server without a previous restore')
+    payload=read_backup(blob,password)
+    version=payload['version']
+    if payload['base_domain']!=base_domain: raise ValueError('Backup domain differs')
+    try:
         with tempfile.TemporaryDirectory(prefix='.restore-',dir=directory.parent) as temp:
             staged=Path(temp)/'state'
             fresh=Store(staged/'state.db',base_domain,reserved,hostname)
@@ -201,6 +259,8 @@ def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
                     restore_financial(db,payload)
                     restore_availability(db,payload)
                 else: db.execute("UPDATE clients SET billing_mode='legacy',billing_timezone=timezone WHERE deadline IS NOT NULL OR duration IS NOT NULL")
+                from server.app.clock_repair import validate_receipts
+                validate_receipts(db)
             for name in payload['files']:
                 data=base64.b64decode(payload['files'][name],validate=True)
                 if len(data)>16384: raise ValueError()
@@ -219,7 +279,8 @@ def restore_state(blob,password,directory,base_domain,hostname,reserved=()):
             Authority(staged/'identity.key','http://127.0.0.1:19000')
             ensure_pki(staged/'pki',hostname)
             # Final conflict check before moving: keep the previous empty state.
-            if current.list_clients(): raise ValueError()
+            require_empty_destination(current)
+            if expected_revision is not None and restore_revision(current,configuration)!=expected_revision: raise ConflictError('Preview is stale')
             directory.rename(previous)
             try:
                 staged.rename(directory)

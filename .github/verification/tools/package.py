@@ -24,6 +24,8 @@ def package(output,*,component=None):
         'docs/DEPLOYMENT.md','docs/SERVER_INSTALL.md','docs/CLIENT_INSTALL.md')
     for filename in filenames:
         if (ROOT/filename).exists(): copy(ROOT/filename,output/filename)
+    for name in ('SECURITY_ASSESSMENT_050.md','SECURITY_FINDINGS_050.csv','UPGRADE_050.md'):
+        copy(ROOT/'docs'/name,output/'docs'/name)
     if component:
         url='https://github.com/Stepan-fair/ha-tunnel-'+component
         (output/'repository.yaml').write_text(f'name: HA Tunnel {component.title()}\nurl: {url}\nmaintainer: Stepan-fair\n',encoding='utf-8')
@@ -41,6 +43,7 @@ def package(output,*,component=None):
                 copy(source,target/component/'app'/source.relative_to(ROOT/component/'app'))
         for source in (ROOT/'shared').glob('*.py'):
             copy(source,target/'shared'/source.name)
+        copy(ROOT/'shared/notification_settings.js',target/'shared/notification_settings.js')
         for name in ('fetch_frp.py','frp_versions.json','healthcheck.py','build_frp.sh'):
             copy(ROOT/'tools'/name,target/'tools'/name)
         copy(ROOT/'requirements.lock',target/'requirements.lock')

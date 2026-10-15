@@ -34,6 +34,14 @@ class Core:
             self.current['revert_at']=None
 
 
+def available_status(ctrl):
+    # HA configuration unit tests keep the authenticated network boundary local.
+    ctrl.credentials.update(server_url='https://tunnel.example.org',client_id='a'*32,secret='x'*43)
+    ctrl.status_origin=ctrl.credentials['server_url']
+    ctrl.status_client=AsyncMock()
+    ctrl.status_client.fetch.return_value={'client_id':'a'*32,'generation':0,'revision':0,'access_state':'allowed'}
+
+
 async def test_modern_http_preserves_existing_access_and_does_not_touch_yaml(tmp_path):
     from client.app.http_config import configure_http,finish_http_trial,HTTPConfirmationRequired
     config=tmp_path/'configuration.yaml'; config.write_text('http: !secret deliberately_unread\n')
@@ -173,6 +181,7 @@ async def test_resume_after_native_confirmation_recovers_without_ha_mutation(tmp
         await configure_http(tmp_path/'x',core,pending)
     ctrl=Controller(tmp_path,tmp_path/'x',AsyncMock(),core)
     ctrl.credentials={'domain':'home.example.org'}; ctrl.launch=AsyncMock()
+    available_status(ctrl)
     await ctrl.resume()
     assert ctrl.state=='confirm_http'
     ctrl.launch.assert_not_awaited()
@@ -207,12 +216,13 @@ async def test_confirmation_monitor_failure_keeps_client_panel_alive(tmp_path,fa
         await configure_http(tmp_path/'x',core,pending)
     ctrl=Controller(tmp_path,tmp_path/'x',AsyncMock(),core)
     ctrl.credentials={'domain':'home.example.org'}; ctrl.state='confirm_http'
+    available_status(ctrl)
     core.current['stable']=core.current['pending']; core.current['pending']=None
     core.current['active_config_type']='stable'
     ctrl.launch=AsyncMock(side_effect=RuntimeError('FRP rejected'))
     if failure=='core': core.get_http_config=AsyncMock(side_effect=CoreCommandError('unauthorized'))
     await ctrl.monitor_once()
-    assert ctrl.state=='error' and ctrl.status()['configured']
+    assert ctrl.state==('configuration_error' if failure=='core' else 'waiting_ha') and ctrl.status()['configured']
 
 
 async def test_reprepare_stops_own_existing_tunnel_before_http_trial(tmp_path):

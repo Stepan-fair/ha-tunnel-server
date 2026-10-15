@@ -2,6 +2,20 @@ import pytest
 from shared.presentation import format_metrics,METRIC_LABELS
 
 
+@pytest.mark.parametrize('reason,expected',[
+    ('clock_error','Ожидает проверки времени сервера'),
+    ('revoked','Доступ отозван'),
+    ('pending','После подключения клиента'),
+    (None,'Прогноз временно недоступен'),
+])
+def test_unavailable_funds_explains_actual_reason(reason,expected):
+    from shared.presentation import format_billing
+    snapshot=dict(mode='monthly',price_kopecks=10000,balance_kopecks=30000,
+        paid_from=100,paid_until=200,funds_until=None,projection_kind='unavailable',
+        projection_limited=False,pause_reason=reason,timezone='UTC',updated_at=150)
+    assert format_billing(snapshot)['funds']==expected
+
+
 def sample(**changes):
     return {'ha_available':True,'frp_connected':True,'rtt_ms':265,'telemetry_age_s':21,
             'to_client_bps':1000,'from_client_bps':0,'to_client_bytes':1000000,

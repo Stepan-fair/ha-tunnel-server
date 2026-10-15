@@ -46,10 +46,13 @@ def test_clock_rollback_never_extends_access():
     wall[0], mono[0] = 900, 5
     assert clock.now() >= 1005
     assert not clock.reliable
-    assert clock.checkpoint() >= 1005
+    assert clock.checkpoint() == 0  # Unconfirmed time is never persisted.
     wall[0] = 1010
-    assert clock.now() == 1010
-    assert clock.reliable
+    assert not clock.reliable
+    for _ in range(3):
+        clock.observe_host({'dt_synchronized':True})
+        if _<2: wall[0]+=10; mono[0]+=10
+    assert clock.reliable and clock.now()==1030
 
 
 def test_clock_restart_before_saved_anchor_is_unreliable():

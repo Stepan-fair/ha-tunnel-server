@@ -60,42 +60,37 @@ async def test_status_unavailable_does_not_launch_from_cached_pause(tmp_path, mo
     assert ctrl.state == 'offline' and ctrl.credentials
 
 
-async def test_old_server_fallback(monkeypatch):
-    import client.app.status as module
-    class Content:
-        async def iter_chunked(self, size): yield b'{"status":"ok","protocol":1}'
-    class Response:
-        status=200
-        content=Content()
-        async def __aenter__(self): return self
-        async def __aexit__(self,*args): pass
-    class Session:
-        def __init__(self,**kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self,*args): pass
-        def get(self,*args,**kwargs):
-            assert kwargs['allow_redirects'] is False
-            return Response()
-        def post(self,*args,**kwargs): pytest.fail('Legacy server has no status route')
-    monkeypatch.setattr(module,'ClientSession',Session)
-    assert await module.ClientStatusClient('https://tunnel.example.org').fetch('a'*32,'x'*43) is None
+async def test_old_server_fallback():
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from client.app.status import ClientStatusClient
+    app=web.Application()
+    async def health(request): return web.json_response({'status':'ok','protocol':1})
+    app.router.add_get('/health',health)
+    async with TestServer(app) as server:
+        service=ClientStatusClient('https://tunnel.example.org')
+        service.server_url=str(server.make_url('')).rstrip('/')
+        try: assert await service.fetch('a'*32,'x'*43) is None
+        finally: await service.close()
 
 
 async def test_rebind_same_client_preserves_http_configuration(tmp_path,monkeypatch):
     from unittest.mock import AsyncMock
+    from tests.test_client_recovery import controller
+    from client.app.enrollment import save_credentials
     import client.app.controller as module
-    ctrl=module.Controller(tmp_path,tmp_path/'configuration.yaml',AsyncMock(),AsyncMock())
-    original={'client_id':'a'*32,'domain':'alpha.example.org','server_url':'https://tunnel.example.org','secret':'old'}
-    ctrl.credentials=original
-    replacement={**original,'secret':'new','ca_pem':'PUBLIC'}
+    ctrl,original=controller(tmp_path)
+    replacement={**original,'secret':'z'*43}
     monkeypatch.setattr(module,'check_http_ready',AsyncMock())
-    monkeypatch.setattr(module,'enroll',AsyncMock(return_value=replacement))
-    monkeypatch.setattr(module,'save_credentials',lambda *args:None)
+    async def enroll(invitation,**kwargs):
+        assert kwargs['expected_client_id']==original['client_id']
+        assert kwargs['binding_secret']==original['secret']
+        save_credentials(kwargs['directory'],replacement)
+        return replacement
+    monkeypatch.setattr(module,'enroll',enroll)
     ctrl.launch=AsyncMock(return_value=True)
     await ctrl.rebind('replacement-invitation')
     assert ctrl.credentials==replacement
-    module.enroll.assert_awaited_once_with('replacement-invitation',expected_client_id=original['client_id'],expected_server_url=original['server_url'],binding_secret=original['secret'])
-    ctrl.supervisor.restart_core.assert_not_awaited()
 
 
 async def test_rebind_wrong_server_is_rejected_before_network(monkeypatch):

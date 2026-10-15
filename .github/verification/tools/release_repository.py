@@ -17,6 +17,7 @@ def release_repository(component,output):
     target.parent.mkdir(parents=True,exist_ok=True)
     text=(ROOT/'tools/release_templates/build.yml').read_text(encoding='utf-8')
     target.write_text(text.replace('__ROLE__',component),encoding='utf-8')
+    (target.parent/'external_acceptance.yml').write_bytes((ROOT/'tools/release_templates/external_acceptance.yml').read_bytes())
     script=Path(output)/'.github/scripts/guard_image.py'
     script.parent.mkdir(parents=True,exist_ok=True)
     script.write_bytes((ROOT/'tools/release_templates/guard_image.py').read_bytes())
@@ -34,6 +35,7 @@ def release_repository(component,output):
     shutil.copyfile(ROOT/'server/Dockerfile',verification/'server/Dockerfile')
     shutil.copyfile(ROOT/'client/Dockerfile',verification/'client/Dockerfile')
     shutil.copyfile(ROOT/'tools/Dockerfile.test',verification/'tools/Dockerfile.test')
+    shutil.copyfile(ROOT/'docs/SECURITY_FINDINGS_050.csv',verification/'docs/SECURITY_FINDINGS_050.csv')
 
 
 if __name__=='__main__':

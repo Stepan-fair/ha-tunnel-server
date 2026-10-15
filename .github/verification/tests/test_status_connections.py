@@ -33,9 +33,9 @@ def verified_connector(tmp_path, monkeypatch):
     original = aiohttp.TCPConnector
     def connector(**kwargs):
         return original(ssl=client_ssl, resolver=LocalResolver(address), **kwargs)
-    # Existing implementation has no connector configuration yet. Patching the
-    # constructor preserves verification and exercises the actual network stack.
-    monkeypatch.setattr(module, 'TCPConnector', connector, raising=False)
+    # Route the explicit connector boundary to a real loopback TLS server;
+    # preserve hostname/CA verification and actual HTTP connection pooling.
+    monkeypatch.setattr(module, 'connector', connector)
     original_session = aiohttp.ClientSession
     def session(**kwargs):
         if 'connector' not in kwargs: kwargs['connector'] = connector()

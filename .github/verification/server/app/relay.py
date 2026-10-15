@@ -28,6 +28,21 @@ async def header(reader):
     return data, lines[0], fields
 
 
+class ClientLock(asyncio.Lock):
+    """Track public acquire waiters so retirement never splits a lock domain."""
+    def __init__(self):
+        super().__init__()
+        self.waiters = 0
+
+    async def acquire(self):
+        self.waiters += 1
+        try: return await super().acquire()
+        finally: self.waiters -= 1
+
+    @property
+    def idle(self): return not self.locked() and not self.waiters
+
+
 class ClientRelay:
     def __init__(self, store, clock, upstream_host='127.0.0.1', upstream_port=18080,*,max_connections=256,max_client_connections=32):
         if any(type(v) is not int or v<1 for v in (max_connections,max_client_connections)):
@@ -35,7 +50,8 @@ class ClientRelay:
         self.max_connections,self.max_client_connections=max_connections,max_client_connections
         self.store, self.clock = store, clock
         self.upstream_host, self.upstream_port = upstream_host, upstream_port
-        self.locks = defaultdict(asyncio.Lock)
+        self.locks = defaultdict(ClientLock)
+        self.retiring = set()
         self.streams = defaultdict(set)
         self.pending = defaultdict(lambda: [0, 0])
         self.samples = {}
@@ -65,8 +81,10 @@ class ClientRelay:
         task.add_done_callback(self.tasks.discard)
 
     async def _write(self, writer, data, client_id, direction):
+        if client_id in self.retiring: raise ConnectionError('Client retired')
         writer.write(data)
         await writer.drain()
+        if client_id in self.retiring: raise ConnectionError('Client retired')
         self.pending[client_id][direction] += len(data)
 
     async def _copy(self, reader, writer, client_id, direction, length=None):
@@ -120,6 +138,7 @@ class ClientRelay:
                     writer.write(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
                     await writer.drain()
                     return
+                if client_id in self.retiring: return
                 snapshot = self.store.access_snapshot(client_id, self.now())
                 if self.closing or snapshot['access_state'] != 'allowed':
                     writer.write(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
@@ -127,6 +146,7 @@ class ClientRelay:
                 self.streams[client_id].add(writer)
             ur, upstream = await asyncio.wait_for(asyncio.open_connection(self.upstream_host, self.upstream_port, limit=LIMIT), 10)
             async with self.locks[client_id]:
+                if client_id in self.retiring: return
                 current = self.store.access_snapshot(client_id, self.now())
                 if writer.is_closing() or current['access_state'] != 'allowed' or current['generation'] != snapshot['generation']: return
                 self.streams[client_id].add(upstream)
@@ -177,11 +197,11 @@ class ClientRelay:
             await asyncio.gather(*pumps, return_exceptions=True)
             for stream in (writer, upstream):
                 if stream is not None:
-                    if client_id: self.streams[client_id].discard(stream)
+                    if client_id: self.streams.get(client_id, set()).discard(stream)
                     stream.close()
                     try: await asyncio.wait_for(stream.wait_closed(), 1)
                     except (OSError, asyncio.TimeoutError): stream.transport.abort()
-            if client_id: self.client_tasks[client_id].discard(asyncio.current_task())
+            if client_id: self.client_tasks.get(client_id, set()).discard(asyncio.current_task())
 
     async def disconnect(self, client_id):
         async with self.locks[client_id]:
@@ -190,13 +210,51 @@ class ClientRelay:
             for task in tuple(self.client_tasks[client_id]):
                 if task is not asyncio.current_task(): task.cancel()
 
+    def _finish_retirement(self, client_id):
+        tasks = self.client_tasks.get(client_id, ())
+        lock = self.locks.get(client_id)
+        if any(not task.done() for task in tasks) or (lock is not None and not lock.idle):
+            return False
+        for cache in (self.pending, self.samples, self.rate_values, self.rates_updated,
+                      self.streams, self.client_tasks, self.locks):
+            cache.pop(client_id, None)
+        self.retiring.discard(client_id)
+        return True
+
+    async def retire(self, client_id, timeout=2):
+        # Called only after durable deletion; this guard precedes every await.
+        # A timed-out task/lock retains the guard until a later flush/retry.
+        self.retiring.add(client_id)
+        for stream in tuple(self.streams.get(client_id, ())): stream.transport.abort()
+        tasks = {task for task in self.client_tasks.get(client_id, ())
+                 if task is not asyncio.current_task() and not task.done()}
+        for task in tasks:
+            if not task.cancelling(): task.cancel()
+        if tasks and timeout > 0:
+            await asyncio.wait(tasks, timeout=timeout)
+        return self._finish_retirement(client_id)
+
     async def flush(self):
-        try:
-            for client_id, counts in list(self.pending.items()):
+        failed = False
+        for client_id, counts in list(self.pending.items()):
+            try:
+                # add_traffic deliberately conflates missing IDs and overflow.
+                # A successful independent read distinguishes deletion without
+                # throwing away counters on SQLite failure or live overflow.
+                with self.store.connection() as db:
+                    exists = db.execute('SELECT 1 FROM clients WHERE id=?', (client_id,)).fetchone()
+                if exists is None:
+                    await self.retire(client_id, 0)
+                    continue
                 to_client, from_client = counts
                 if to_client or from_client:
                     self.store.add_traffic(client_id, to_client, from_client)
                     counts[0] -= to_client; counts[1] -= from_client
+            except Exception as error:
+                failed = True
+                if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',error,component='relay',fatal=False)
+        for client_id in tuple(self.retiring): self._finish_retirement(client_id)
+        try:
             now = time.monotonic()
             for client in self.store.list_clients():
                 cid = client['client_id']
@@ -207,10 +265,11 @@ class ClientRelay:
                     self.rate_values[cid] = tuple(max(0, (v-o)/(now-old[0])) for v, o in zip(counts, old[1]))
                     self.rates_updated[cid] = now
                     self.samples[cid] = (now, counts)
-            self.telemetry_error = None
         except Exception as error:
+            failed = True
             if getattr(self,'diagnostics',None): self.diagnostics.failure('storage_error',error,component='relay',fatal=False)
-            self.telemetry_error = 'traffic_storage_error'
+        self.telemetry_error = 'traffic_storage_error' if failed else None
+        if failed:
             self.rate_values.clear()
             self.rates_updated.clear()
             self.samples.clear()
@@ -227,10 +286,13 @@ class ClientRelay:
     async def close(self):
         self.closing = True
         if self.server:
-            self.server.close(); await self.server.wait_closed()
+            self.server.close()
         if self.flusher:
             self.flusher.cancel(); await asyncio.gather(self.flusher, return_exceptions=True)
         for cid in list(self.streams): await self.disconnect(cid)
         for task in tuple(self.tasks): task.cancel()
         await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+        # Python's Server.wait_closed waits for accepted transports as well.
+        # Close/cancel their owners first, including an idle WebSocket peer.
+        if self.server: await self.server.wait_closed()
         await self.flush()

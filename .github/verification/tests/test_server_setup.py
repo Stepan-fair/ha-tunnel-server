@@ -3,13 +3,21 @@ from aiohttp.test_utils import TestClient, TestServer
 from server.app.setup import SetupService, make_setup_app
 
 
+@pytest.fixture(autouse=True)
+def known_core_admin(monkeypatch):
+    async def verify(user,token): return user=='admin'
+    monkeypatch.setattr('server.app.setup.verified_admin',verify)
+    async def resolve(host): return ['172.30.33.9']
+    monkeypatch.setattr('server.app.npm_dependency.resolve_npm',resolve)
+
+
 class Supervisor:
     def __init__(self): self.options={}; self.writes=[]
     async def get(self,path):
         if path=='/addons/self/info': return {'options':dict(self.options)}
         if path=='/supervisor/info': return {'timezone':'Europe/Moscow','arch':'amd64'}
         if path=='/addons': return {'addons':[{'slug':'test_nginxproxymanager','name':'Nginx Proxy Manager'}]}
-        if path=='/addons/test_nginxproxymanager/info': return {'hostname':'test-nginxproxymanager'}
+        if path=='/addons/a0d7b954_nginxproxymanager/info': return dict(slug='a0d7b954_nginxproxymanager',hostname='a0d7b954-nginxproxymanager',repository='a0d7b954',host_network=False,state='started',ip_address='172.30.33.9')
         raise ValueError(path)
     async def post(self,path,payload):
         assert path=='/addons/self/options'
@@ -18,7 +26,7 @@ class Supervisor:
 
 def draft():
     return {'base_domain':'example.org','server_url':'https://tunnel.example.org',
-            'npm_host':'test-nginxproxymanager','admin_user_ids':['admin'],
+            'npm_host':'a0d7b954-nginxproxymanager','admin_user_ids':['admin'],
             'reserved_names':[],'bandwidth_limit_mb':10}
 
 
@@ -28,14 +36,13 @@ async def test_blank_options_and_detection(tmp_path):
     snap=service.snapshot()
     assert not snap['ready'] and not snap['options'].get('base_domain')
     assert snap['detected']['timezone']=='Europe/Moscow'
-    assert snap['detected']['npm_host']=='test-nginxproxymanager'
+    assert snap['detected']['npm_host']=='a0d7b954-nginxproxymanager'
 
 
 async def test_npm_discovery_with_default_supervisor_role(tmp_path):
     class RestrictedSupervisor(Supervisor):
         async def get(self,path):
             if path=='/addons': raise ValueError('403: default role cannot list applications')
-            if path=='/addons/a0d7b954_nginxproxymanager/info': return {'hostname':'a0d7b954-nginxproxymanager'}
             return await super().get(path)
     service=SetupService(tmp_path,RestrictedSupervisor())
     data=await service.detect()

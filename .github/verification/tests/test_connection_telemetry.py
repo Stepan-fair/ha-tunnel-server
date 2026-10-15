@@ -18,7 +18,8 @@ async def test_probe_accepts_only_ha_auth_required(tmp_path,greeting,expected):
     store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
     c=store.redeem(store.issue('alpha',1000).code,1001)
     store.seen(c.client_id,2000)
-    store.live_proxies={c.client_id:0}
+    owner=store.admission.login(c.client_id,0,'','process')
+    store.admission.activity(c.client_id,0,owner['run_id'],owner['epoch'],'Ping')
     app=web.Application()
     async def ws(request):
         assert request.host==c.domain
@@ -50,7 +51,9 @@ async def test_probe_result_discarded_after_revision_change(tmp_path,monkeypatch
     store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
     c=store.redeem(store.issue('alpha',1000).code,1001)
     store.set_capabilities(c.client_id,['access-v1'])
-    store.seen(c.client_id,2000); store.live_proxies={c.client_id:0}
+    store.seen(c.client_id,2000)
+    owner=store.admission.login(c.client_id,0,'','process')
+    store.admission.activity(c.client_id,0,owner['run_id'],owner['epoch'],'Ping')
     relay=ClientRelay(store,store.clock)
     service=TelemetryService(store,relay,store.clock)
     entered,released=asyncio.Event(),asyncio.Event()
@@ -84,7 +87,9 @@ async def test_probe_redirect_is_not_followed(tmp_path):
 async def test_probe_loop_bounds_pending_tasks_and_visits_every_client(tmp_path,monkeypatch):
     store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
     clients=[store.redeem(store.issue(f'client-{i}',1000).code,1001) for i in range(24)]
-    store.live_proxies={c.client_id:0 for c in clients}
+    for c in clients:
+        owner=store.admission.login(c.client_id,0,'','process')
+        store.admission.activity(c.client_id,0,owner['run_id'],owner['epoch'],'Ping')
     for client in clients: store.seen(client.client_id,2000)
     relay=ClientRelay(store,store.clock)
     service=TelemetryService(store,relay,store.clock)
@@ -114,7 +119,9 @@ async def test_probe_loop_bounds_pending_tasks_and_visits_every_client(tmp_path,
 async def test_probe_shutdown_cancels_blocked_workers(tmp_path,monkeypatch):
     store=Store(tmp_path/'state.db','example.org',clock=lambda:2000)
     clients=[store.redeem(store.issue(f'client-{i}',1000).code,1001) for i in range(16)]
-    store.live_proxies={c.client_id:0 for c in clients}
+    for c in clients:
+        owner=store.admission.login(c.client_id,0,'','process')
+        store.admission.activity(c.client_id,0,owner['run_id'],owner['epoch'],'Ping')
     for client in clients: store.seen(client.client_id,2000)
     service=TelemetryService(store,ClientRelay(store,store.clock),store.clock)
     entered=asyncio.Event()

@@ -81,9 +81,11 @@ async def test_ingress_identity_csrf_and_revoke(setup):
     s,a,o,p,plugin,admin = setup
     revoked=[]
     async def disconnect(client_id):
-        s.revoke(client_id)
         revoked.append(client_id)
-    async with TestClient(TestServer(admin(s,a,o,disconnect))) as c:
+    from server.app.access import AccessService
+    from server.app.relay import ClientRelay
+    relay=ClientRelay(s,s.now);relay.disconnect=disconnect
+    async with TestClient(TestServer(admin(s,a,o,disconnect,access=AccessService(s,relay,s.now)))) as c:
         assert (await c.get('/')).status==403
         assert (await c.get('/',headers={'X-Remote-User-Id':'other'})).status==403
         headers={'X-Remote-User-Id':'admin-id'}
@@ -96,7 +98,7 @@ async def test_ingress_identity_csrf_and_revoke(setup):
         data=await r.json()
         assert r.status==200 and data['invitation'].startswith('HT1.')
         assert (await c.get('/api/clients/'+data['client_id']+'/revoke',headers=headers)).status==405
-        r=await c.post('/api/clients/'+data['client_id']+'/revoke',json={},headers=headers)
+        r=await c.post('/api/clients/'+data['client_id']+'/revoke',json={'revision':0,'command_id':'revoke'},headers=headers)
         assert r.status==200 and revoked==[data['client_id']]
 
 

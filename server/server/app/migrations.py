@@ -21,7 +21,7 @@ EXTRA_COLUMNS = {
 def migrate(db):
     db.execute('BEGIN IMMEDIATE')
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version > 5:
+    if version > 6:
         raise ValueError('Database created by a newer version')
     columns = {row['name'] for row in db.execute('PRAGMA table_info(clients)')}
     if version >= 2:
@@ -30,6 +30,7 @@ def migrate(db):
         if version >= 3:
             migrate_billing(db)
             migrate_availability(db)
+            migrate_clock_repair(db)
             return
     for name, declaration in EXTRA_COLUMNS.items():
         if name not in columns:
@@ -53,6 +54,7 @@ def migrate(db):
     db.execute('PRAGMA user_version=3')
     migrate_billing(db)
     migrate_availability(db)
+    migrate_clock_repair(db)
 
 BILLING_COLUMNS = {
     'billing_mode': "TEXT NOT NULL DEFAULT 'free'",
@@ -103,3 +105,10 @@ def migrate_availability(db):
         paid_until_at_start REAL NOT NULL,eligible INTEGER NOT NULL,PRIMARY KEY(episode_id,client_id))""")
     db.execute('CREATE TABLE IF NOT EXISTS availability_checkpoint (client_id TEXT PRIMARY KEY,paid_until REAL NOT NULL)')
     db.execute('PRAGMA user_version=5')
+
+
+def migrate_clock_repair(db):
+    # Semantic fence: pre-repair readers ignore durable holds and would debit
+    # again. No table rewrite; version <=5 refuses this state on downgrade.
+    if db.execute('PRAGMA user_version').fetchone()[0]<6:
+        db.execute('PRAGMA user_version=6')

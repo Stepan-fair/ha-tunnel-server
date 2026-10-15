@@ -43,3 +43,37 @@ async def test_paid_expiry_closes_streams_free_client_survives_and_topup_resumes
             await wb.send_str('same free session');assert (await wb.receive(timeout=3)).data=='same free session'
         finally:await wa.close();await wb.close()
     finally:await relay.close()
+
+
+async def test_clock_quarantine_closes_paid_stream_preserves_free_session(environment):
+    from tests.test_clock_repair import Time
+    from tests.test_billing_store import operations
+    store,authority,server,plugin,pki,clients,session,upstream,port=environment
+    instant=Time(time.time());clock=instant.clock();instant.confirm(clock);store.clock=clock
+    relay=ClientRelay(store,clock,upstream_port=urlsplit(upstream).port)
+    await relay.start(port=0)
+    access=AccessService(store,relay,clock);server.access=access
+    paid,free=clients;cid=paid[0].client_id;repo=BillingRepository(store)
+    for action,amount in (('set_price',30000),('topup',90000)):
+        snap=store.access_snapshot(cid,clock.now())
+        repo.command(cid,action,action,snap['revision'],value_kopecks=amount,now=clock.now(),timezone='UTC')
+    url=f'http://127.0.0.1:{relay.port}'
+    try:
+        for credentials,runtime,config in clients:
+            config['transport']['poolCount']=5
+            await runtime.start(config);await wait_http(session,url,credentials.domain,credentials.domain.split('.')[0])
+        wa=await session.ws_connect(url+'/ws',headers={'Host':paid[0].domain})
+        wb=await session.ws_connect(url+'/ws',headers={'Host':free[0].domain})
+        try:
+            before=operations(store);anchor=clock.checkpoint()
+            instant.wall+=90*86400
+            await access.expire_once()
+            assert (await wa.receive(timeout=3)).type in (WSMsgType.CLOSE,WSMsgType.CLOSED,WSMsgType.ERROR)
+            await wb.send_str('free during quarantine');assert (await wb.receive(timeout=3)).data=='free during quarantine'
+            async with session.get(url,headers={'Host':paid[0].domain}) as response: assert response.status==403
+            assert operations(store)==before and clock.checkpoint()==anchor
+            instant.wall-=90*86400;instant.confirm(clock)
+            await wait_http(session,url,paid[0].domain,'alpha')
+            await wb.send_str('same free session');assert (await wb.receive(timeout=3)).data=='same free session'
+        finally: await wa.close();await wb.close()
+    finally: await relay.close()

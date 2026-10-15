@@ -38,17 +38,20 @@ def test_wrong_client_code_does_not_mutate_either_record(tmp_path):
 def test_late_close_cannot_remove_new_login_in_same_generation(tmp_path):
     store, a, _ = populated(tmp_path)
     authority = Authority(tmp_path/'identity.key', 'http://127.0.0.1:19000')
-    login = {'user': a.client_id, 'privilege_key': authority.issue(a.client_id)}
-    old = authorize('Login', login, store, authority)['content']['metas']
-    new = authorize('Login', login, store, authority)['content']['metas']
-    assert old['ha_tunnel_session'] != new['ha_tunnel_session']
-    proxy = {'user': {'user': a.client_id, 'metas': new}, 'proxy_type': 'http',
+    login = {'user': a.client_id, 'privilege_key': authority.issue(a.client_id),
+             'metas': {'ha_tunnel_process':'same-process'}}
+    old_login = authorize('Login', login, store, authority)['content']
+    new_login = authorize('Login', login, store, authority)['content']
+    old = {k:old_login[k] for k in ('user','run_id','metas')}
+    new = {k:new_login[k] for k in ('user','run_id','metas')}
+    assert old['metas']['ha_tunnel_session'] != new['metas']['ha_tunnel_session']
+    proxy = {'user': new, 'proxy_type': 'http',
              'proxy_name': a.client_id+'.ha', 'custom_domains': [a.domain]}
     assert not authorize('NewProxy', proxy, store, authority)['reject']
-    authorize('CloseProxy', {'user': {'user': a.client_id, 'metas': old}}, store, authority)
-    assert store.live_proxies[a.client_id] == 0
-    authorize('CloseProxy', {'user': {'user': a.client_id, 'metas': new}}, store, authority)
-    assert a.client_id not in store.live_proxies
+    assert authorize('CloseProxy', {'user': old,'proxy_name':a.client_id+'.ha'}, store, authority)['reject']
+    assert store.admission.connected(a.client_id,0)
+    assert not authorize('CloseProxy', {'user': new,'proxy_name':a.client_id+'.ha'}, store, authority)['reject']
+    assert store.admission.connected(a.client_id,0)  # Closing a proxy is not logout.
 
 
 def test_rebound_proxy_uses_server_generation_route(tmp_path):
@@ -56,7 +59,7 @@ def test_rebound_proxy_uses_server_generation_route(tmp_path):
     store.redeem(store.reissue(a.client_id, 2000).code, 2000, binding=(a.client_id,a.secret))
     authority = Authority(tmp_path/'identity.key', 'http://127.0.0.1:19000')
     login = authorize('Login', {'user': a.client_id, 'privilege_key': authority.issue(a.client_id, generation=1)}, store, authority)
-    proxy = {'user': {'user': a.client_id, 'metas': login['content']['metas']}, 'proxy_type': 'http',
+    proxy = {'user': {k:login['content'][k] for k in ('user','run_id','metas')}, 'proxy_type': 'http',
              'proxy_name': a.client_id+'.ha', 'custom_domains': [a.domain]}
     normalized = authorize('NewProxy', proxy, store, authority)['content']
     assert normalized['custom_domains'] != [a.domain]

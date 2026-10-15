@@ -14,6 +14,7 @@ def controller(tmp_path):
         async def stop(self): self.stopped+=1
         def status(self): return {'running':False}
     class Supervisor:
+        async def wait_proxy_ready(self,**kwargs): pass
         async def restart_core(self): pytest.fail('Recovery must not restart Core')
     ctrl=module.Controller(tmp_path/'state',tmp_path/'configuration.yaml',Runtime(),Supervisor())
     ctrl.state='revoked'
@@ -24,13 +25,16 @@ async def test_revoked_client_can_rebind_without_core_restart(tmp_path,monkeypat
     ctrl,old=controller(tmp_path)
     async def ready(*args): pass
     async def enroll(code,**expected):
+        assert expected['directory']==ctrl.directory
+        expected.pop('directory'); expected.pop('before_commit')
         assert expected=={'expected_client_id':old['client_id'],'expected_server_url':old['server_url'],'binding_secret':old['secret']}
+        save_credentials(ctrl.directory,{**old,'secret':'z'*43})
         return {**old,'secret':'z'*43}
     async def launch(**kwargs): return True
     monkeypatch.setattr(module,'check_http_ready',ready)
     monkeypatch.setattr(module,'enroll',enroll)
     ctrl.launch=launch
-    await ctrl.connect('new-code')
+    await ctrl.rebind('new-code')
     assert ctrl.state=='connecting' and load_credentials(ctrl.directory)['secret']=='z'*43
 
 
@@ -59,7 +63,8 @@ async def test_confirmed_other_connection_clears_old_status(tmp_path,monkeypatch
     ctrl.telemetry={'ha_available':False}
     async def ready(*args): pass
     async def enroll(code,**expected):
-        assert expected=={}
+        assert expected['directory']==ctrl.directory
+        save_credentials(ctrl.directory,{**old,'client_id':'b'*32,'domain':'beta.example.org','secret':'z'*43})
         return {**old,'client_id':'b'*32,'domain':'beta.example.org','secret':'z'*43}
     async def launch(**kwargs): return True
     monkeypatch.setattr(module,'check_http_ready',ready)
@@ -107,6 +112,7 @@ async def test_monitor_cannot_overlap_credential_replacement(tmp_path,monkeypatc
         async def close(self): pass
     async def enroll(*args,**kwargs):
         enrolling.set()
+        save_credentials(ctrl.directory,{**old,'secret':'z'*43})
         return {**old,'secret':'z'*43}
     monkeypatch.setattr(module,'ClientStatusClient',Status)
     monkeypatch.setattr(module,'verify_tunnel_tls',AsyncMock())

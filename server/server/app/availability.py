@@ -19,6 +19,7 @@ class AvailabilityService:
         return json.loads(row[0]) if row else default
 
     def _checkpoint(self,db,now):
+        if not getattr(self.clock,'reliable',True): return
         self._metadata(db,'service_last_healthy',now)
         self._metadata(db,'clock_anchor',now)
         db.execute('DELETE FROM availability_checkpoint')
@@ -55,10 +56,25 @@ class AvailabilityService:
             repo._ledger(db,updated,'compensation',operation,now,before=row['balance_kopecks'],days=days)
         db.execute("UPDATE outage_episodes SET ended_at=?,compensated_days=?,state='closed' WHERE id=?",(now,days,episode['id']))
 
+    def _time_ready(self,now):
+        if not getattr(self.clock,'reliable',True):
+            if getattr(self.clock,'ambiguous',False): self.store.set_metadata('clock_ambiguous',True)
+            return False
+        if getattr(self.clock,'ambiguous',False) or self.store.get_metadata('clock_ambiguous',False):
+            from server.app.clock_repair import reset_baseline
+            with self.store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self.store.ensure_mutation_allowed()
+                reset_baseline(db,now)
+            self.clock.ambiguous=False
+            self.recovered=True
+        return now>=self.store.get_metadata('clock_anchor',0)
+
     async def recover(self):
+        if self.store.administration.busy or self.store.migrating: return False
         if not self.recovered:
             now=self.clock.now(); instant(now)
-            if getattr(self.clock,'reliable',True):
+            if self._time_ready(now):
                 with self.store.connection() as db:
                     db.execute('BEGIN IMMEDIATE')
                     if self._get(db,'service_last_healthy') is not None: self._open(db,now)
@@ -66,8 +82,9 @@ class AvailabilityService:
         await self.sample()
 
     async def sample(self):
+        if self.store.administration.busy or self.store.migrating: return False
         now=self.clock.now(); instant(now)
-        if now<self.store.get_metadata('clock_anchor',0) or not getattr(self.clock,'reliable',True):
+        if not self._time_ready(now):
             self.healthy=False
             return False
         try:
@@ -75,10 +92,12 @@ class AvailabilityService:
             healthy=isinstance(result,dict) and all(result.get(key) is True for key in ('frp','gateway','npm'))
         except (OSError,TimeoutError):
             healthy=False
+        if self.store.administration.busy or self.store.migrating: return False
         now=self.clock.now(); instant(now)
-        if now<self.store.get_metadata('clock_anchor',0) or not getattr(self.clock,'reliable',True):
+        if not self._time_ready(now):
             self.healthy=False
             return False
+        if self.store.administration.busy or self.store.migrating: return False
         self.healthy=False
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -91,11 +110,13 @@ class AvailabilityService:
         return healthy
 
     async def shutdown(self):
+        if self.store.administration.busy or self.store.migrating: return False
         # Last verified healthy checkpoint, not shutdown success, starts offline time.
         now=self.clock.now(); instant(now)
-        if now<self.store.get_metadata('clock_anchor',0) or not getattr(self.clock,'reliable',True):
+        if not self._time_ready(now):
             self.healthy=False
             return False
+        if self.store.administration.busy or self.store.migrating: return False
         self.healthy=False
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

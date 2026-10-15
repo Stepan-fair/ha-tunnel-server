@@ -7,6 +7,7 @@ import time
 from aiohttp import web
 
 DIAGNOSTICS = web.AppKey('diagnostics',object)
+TRUSTED_HTTPS = web.RequestKey('trusted_https',bool)
 
 
 class Limits:
@@ -48,7 +49,7 @@ async def safe_errors(request, handler):
     response.headers.update({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
                              'Referrer-Policy':'no-referrer',
                              'Content-Security-Policy':"default-src 'self'; style-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'"})
-    if request.get('trusted_https'):
+    if request.get(TRUSTED_HTTPS):
         response.headers['Strict-Transport-Security']='max-age=31536000'
     return response
 

@@ -6,10 +6,11 @@ import socket
 from urllib.parse import urlsplit
 import aiohttp
 from shared.validation import origin
+from shared.dns import getaddrinfo
 
 
 async def public_addresses(host):
-    rows=await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo,host,443,socket.AF_INET,socket.SOCK_STREAM),5)
+    rows=await asyncio.wait_for(getaddrinfo(host,443,socket.AF_INET),5)
     ips=sorted({row[4][0] for row in rows})
     if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips): raise ValueError('Nonpublic DNS address')
     return ips

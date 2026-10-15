@@ -33,6 +33,8 @@ class DomainMigration:
     def __init__(self,store,setup,access,*,readiness=check_readiness):
         self.store,self.setup,self.access=store,setup,access
         self.readiness=readiness
+        self.administration=store.administration
+        setup.administration=self.administration
 
     def _revision(self,options,db):
         clients=[tuple(row) for row in db.execute('SELECT id,domain,revision,generation,issued,expires,code_hash FROM clients ORDER BY id')]
@@ -92,10 +94,14 @@ class DomainMigration:
     def _activate(self,target):
         self.store.base_domain=target['base_domain']
         self.store.reserved=set(target.get('reserved_names',[]))|{'tunnel','www','mail','smtp','ftp','admin','api',urlsplit(target['server_url']).hostname.split('.')[0]}
-        for cache in (self.store.live_proxies,self.store.live_sessions,self.store.login_sessions): cache.clear()
+        self.store.admission.clear()
         self.setup.options=dict(target)
 
     async def apply(self,draft,command_id,expected_revision,*,actor=None):
+        async with self.administration.exclusive('migration'):
+            return await self._apply(draft,command_id,expected_revision,actor=actor)
+
+    async def _apply(self,draft,command_id,expected_revision,*,actor=None):
         if not isinstance(command_id,str) or not 1<=len(command_id)<=128 or not isinstance(expected_revision,str) or len(expected_revision)!=64:
             raise ValueError('Invalid migration command')
         actor=actor or Actor('system')
@@ -131,6 +137,10 @@ class DomainMigration:
                 if self.setup.on_saved:self.setup.on_saved()
 
     async def recover(self):
+        async with self.administration.exclusive('migration'):
+            return await self._recover()
+
+    async def _recover(self):
         marker=self.store.get_metadata('domain_migration')
         if not marker or marker['phase']=='aborted': return False
         if not isinstance(marker,dict) or marker.get('phase') not in ('prepared','options_saved','committed'):
@@ -163,5 +173,5 @@ async def recover_directory(setup):
     if not row:return False
     marker=json.loads(row[0])
     base=marker['target' if marker.get('phase')=='committed' else 'original']['base_domain']
-    store=Store(path,base)
+    store=Store(path,base,administration=setup.administration)
     return await DomainMigration(store,setup,None).recover()

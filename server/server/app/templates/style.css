@@ -85,6 +85,7 @@ dialog::backdrop { background: #102e5580; }
 .journal-item p { margin: 4px 0; }
 .badge { display: inline-block; border-radius: 20px; padding: 4px 10px; background: var(--soft); font-size: .82rem; }
 #help-content { overflow-wrap: anywhere; }
+#clock-result { overflow-wrap: anywhere; }
 #help-content pre { white-space: pre-wrap; font: inherit; }
 footer { margin: 22px 0; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visible { outline: 3px solid #477fbc; outline-offset: 3px; }

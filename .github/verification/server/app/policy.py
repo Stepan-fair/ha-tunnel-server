@@ -1,6 +1,4 @@
 """FRP wire field whitelist; all unknown/unsafe proxy features fail closed."""
-import time
-import secrets
 from server.app.routing import upstream_domain
 
 DENY = {'reject':True,'reject_reason':'Access denied'}
@@ -30,37 +28,41 @@ def authorize(op, content, store, authority, bandwidth_limit_mb=10):
             claims=authority.claims(content.get('privilege_key'))
             if claims['sub'] != client.client_id or claims.get('generation',0)!=generation:
                 return dict(DENY)
-            if op in ('Login', 'Ping'):
-                store.seen(client.client_id, int(time.time()))
-            if op=='Login':
-                nonce = secrets.token_hex(16)
-                store.login_sessions[client.client_id] = nonce
-                return {'reject':False,'unchange':False,'content':{**content,'metas':{'ha_tunnel_generation':str(generation),'ha_tunnel_session':nonce}}}
+        if op == 'Login':
+            metas=content.get('metas') or {}
+            if not isinstance(metas,dict): return dict(DENY)
+            owner=store.admission.login(client.client_id,generation,content.get('run_id',''),
+                metas.get('ha_tunnel_process'))
+            if owner is None: return dict(DENY)
+            return {'reject':False,'unchange':False,'content':{**content,
+                'run_id':owner['run_id'],'client_id':client.client_id,'pool_count':1,
+                'metas':{'ha_tunnel_generation':str(generation),'ha_tunnel_session':owner['epoch']}}}
+        user=content.get('user',{})
+        metas=user.get('metas',{})
+        if not isinstance(metas,dict) or metas.get('ha_tunnel_generation')!=str(generation):
+            return dict(DENY)
+        identity=(client.client_id,generation,user.get('run_id'),metas.get('ha_tunnel_session'))
+        if op in ('Ping','NewWorkConn'):
+            if op=='NewWorkConn' and content.get('run_id')!=user.get('run_id'): return dict(DENY)
+            if not store.admission.activity(*identity,op): return dict(DENY)
+            store.seen(client.client_id,int(store.now()))
             return dict(ALLOW)
         if op == 'NewProxy':
-            value=content.get('user',{}).get('metas',{}).get('ha_tunnel_generation')
-            if value!=str(generation) and not (generation==0 and value is None): return dict(DENY)
-            session = content.get('user',{}).get('metas',{}).get('ha_tunnel_session')
-            if session != store.login_sessions.get(client.client_id): return dict(DENY)
             if (set(content) - FIELDS or content.get('proxy_type') != 'http' or
                     content.get('proxy_name') != client.client_id+'.ha' or
                     content.get('custom_domains') != [client.domain] or
                     any(content.get(key) for key in EMPTY_FIELDS)):
                 return dict(DENY)
             # The server sets the bandwidth ceiling; the client cannot remove it.
-            store.live_proxies[client.client_id]=generation
-            store.live_sessions[client.client_id]=(generation,session)
+            if not store.admission.activity(*identity,op): return dict(DENY)
+            store.seen(client.client_id,int(store.now()))
             return {'reject':False,'unchange':False,'content':{
                 **content,'bandwidth_limit':f'{bandwidth_limit_mb}MB','bandwidth_limit_mode':'server',
                 'custom_domains':[upstream_domain(client.client_id,client.domain,generation)],
                 'host_header_rewrite':client.domain}}
         if op == 'CloseProxy':
-            metas = content.get('user',{}).get('metas',{})
-            identity = (int(metas.get('ha_tunnel_generation',0)),metas.get('ha_tunnel_session'))
-            if store.live_sessions.get(client.client_id) == identity:
-                store.live_proxies.pop(client.client_id,None)
-                store.live_sessions.pop(client.client_id,None)
-            return dict(ALLOW)
+            if content.get('proxy_name') != client.client_id+'.ha': return dict(DENY)
+            return dict(ALLOW if store.admission.close_proxy(*identity) else DENY)
     except (ValueError, TypeError, AttributeError):
         return dict(DENY)
     return dict(DENY)

@@ -39,6 +39,21 @@ async def connect(relay, host):
     return reader, writer, header
 
 
+async def test_shutdown_closes_live_streams_before_waiting_for_listener(network):
+    store,clients,relay,_=network
+    reader,writer,header=await connect(relay,clients[0].domain)
+    assert b'101' in header
+    writer.write(b'last-count');await writer.drain()
+    assert await reader.readexactly(10)==b'last-count'
+    try:
+        await asyncio.wait_for(relay.close(),2)
+        assert await asyncio.wait_for(reader.read(1),1)==b''
+        snap=store.access_snapshot(clients[0].client_id,2000)
+        assert snap['to_client_bytes']>=10 and snap['from_client_bytes']>=10
+    finally:
+        writer.close();await writer.wait_closed()
+
+
 async def test_pause_closes_only_selected_client(network):
     store, clients, relay, access = network
     a, b = clients

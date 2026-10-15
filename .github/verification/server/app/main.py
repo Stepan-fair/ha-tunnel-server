@@ -12,21 +12,20 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import time
 from urllib.parse import urlsplit
 
-from shared.files import atomic_write
+from shared.liveness import write_heartbeat
 from shared.service import listen,shutdown_event
-from shared.validation import domain,origin
-from server.app.store import Store
+from server.app.store import Store,ConflictError
 from server.app.identity import Authority
 from server.app.pki import ensure_pki
 from server.app.runtime import ServerRuntime,server_config
 from server.app.web import make_public_app,make_plugin_app,make_ingress_app
-from server.app.gateway import nginx_config
-from server.app.backup import export_state,restore_state
-from server.app.clock import SafeClock
+from server.app.gateway import Gateway
+from server.app.npm_dependency import NpmRuntime,NPM_HOST
+from server.app.backup import export_state,restore_state,require_empty_destination,restore_revision
+from server.app.clock import SafeClock, ClockMonitor
 from server.app.relay import ClientRelay
 from server.app.access import AccessService
 from server.app.domain_migration import DomainMigration,recover_directory
@@ -40,34 +39,46 @@ from server.app.setup import SetupService,make_setup_app,validate_options
 from shared.supervisor_client import SupervisorClient
 from shared.ha_admin import verified_admin
 from shared.privileges import drop_server_privileges
-from shared.environment import child_environment
-from shared.process_output import ProcessOutput
 from shared.http import DIAGNOSTICS
+from shared.ha_notifications import HaNotifications
+from shared.notification_state import NotificationState
+from shared.notifications import NotificationWorker,server_snapshots
 
 HEALTH_PATH=Path('/tmp/ha-tunnel-health')
-SERVER_VERSION='0.4.3'
+SERVER_VERSION='0.5.0'
 
 
 def phase(name,component='server'):
     if diagnostics: diagnostics.phase(name,component)
 
 
+def notification_worker(directory, administration, store=None):
+    """Observe lifecycle gates without reserving Administration for network I/O."""
+    return NotificationWorker(NotificationState(Path(directory)/'notifications.json','server'),
+        HaNotifications(os.environ.get('SUPERVISOR_TOKEN')),
+        (lambda:server_snapshots(store)) if store is not None else lambda:[],
+        gate=lambda:(store is None or not store.migrating) and not administration.busy)
+
+
 async def run_setup(setup):
     reload_event=asyncio.Event()
     setup.on_saved=reload_event.set
     async def admin(user): return await verified_admin(user,os.environ.get('SUPERVISOR_TOKEN'))
-    runner=await listen(make_setup_app(setup,admin),'0.0.0.0',8099)
-    async def health():
-        while True:
-            atomic_write(HEALTH_PATH,str(int(time.time())).encode())
-            await asyncio.sleep(5)
-    tasks=[asyncio.create_task(health(),name='setup-health'),asyncio.create_task(shutdown_event()),asyncio.create_task(reload_event.wait())]
+    notifications=notification_worker(setup.directory,setup.administration)
+    runner=await listen(make_setup_app(setup,admin,notifications=notifications),'0.0.0.0',8099)
+    await notifications.start()
+    tasks=[asyncio.create_task(shutdown_event()),asyncio.create_task(reload_event.wait())]
     try:
-        done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
-        for task in done: task.result()
+        while True:
+            done,_=await asyncio.wait(tasks,timeout=5,return_when=asyncio.FIRST_COMPLETED)
+            write_heartbeat(HEALTH_PATH)
+            if done:
+                for task in done: task.result()
+                break
     finally:
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
+        await notifications.close()
         await runner.cleanup()
     return reload_event.is_set()
 
@@ -96,34 +107,35 @@ async def _main():
     try:
         options=validate_options(setup.options)
         setup.validate_existing(options)
-        phase('resolve_npm','npm')
-        addresses=await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo,options['npm_host'],None,socket.AF_INET),5)
-        if diagnostics: diagnostics.component('npm','healthy')
-    except (ValueError,TypeError,socket.gaierror,TimeoutError) as error:
+        if options['npm_host']!=NPM_HOST: raise ValueError('Unsupported NPM hostname')
+    except (ValueError,TypeError) as error:
         if diagnostics: diagnostics.failure('startup_error',error,component=diagnostics.active_component,fatal=False)
         setup.detected['startup_problem']='Проверьте домен, адрес регистрации, занятые имена и доступность NPM. Публичный туннель пока не запущен.'
         return await run_setup(setup)
-    return await run_operational(options,addresses,setup)
+    return await run_operational(options,setup)
 
 
-async def run_operational(options,addresses,setup):
+async def run_operational(options,setup):
+    options=dict(options)
     options['tunnel_host']=urlsplit(options['server_url']).hostname
-    options['trusted_proxy_ips']=sorted({entry[4][0] for entry in addresses})
+    options['trusted_proxy_ips']=[]
     options['tunnel_port']=7000
-    state=Path('/data/state')
+    state=setup.directory/'state'
     previous=state.with_name('state.pre-restore')
     if not state.exists() and previous.exists(): previous.rename(state)
     phase('prepare_pki','pki')
     pki=ensure_pki(state/'pki',options['tunnel_host'])
     options['ca_pem']=pki.ca.read_text()
     phase('open_database','storage')
-    store=Store(state/'state.db',options['base_domain'],options.get('reserved_names',[]),options['tunnel_host'])
+    store=Store(state/'state.db',options['base_domain'],options.get('reserved_names',[]),options['tunnel_host'],administration=setup.administration)
     # Listeners may serve requests during startup; compensation must precede any purchase.
     store.billing_available=lambda:False
     phase('check_clock','clock')
     clock=SafeClock(anchor=store.get_metadata('clock_anchor',0))
     store.clock=clock
-    journal=Journal(store,operations_path='/data/journal-operations.json')
+    notifications=notification_worker(setup.directory,setup.administration,store)
+    clock_monitor=ClockMonitor(store,clock,SupervisorClient(os.environ.get('SUPERVISOR_TOKEN')))
+    journal=Journal(store,operations_path=setup.directory/'journal-operations.json')
     journal.startup(clock.now())
     relay=ClientRelay(store,clock)
     relay.diagnostics=diagnostics
@@ -136,34 +148,49 @@ async def run_operational(options,addresses,setup):
         return clients
     mqtt=MqttBridge(store.get_metadata('instance_id'),'server',
         lambda:mqtt_service(os.environ.get('SUPERVISOR_TOKEN')),states,
-        discovery_cache='/data/mqtt-discovery.json')
+        discovery_cache=setup.directory/'mqtt-discovery.json')
     mqtt.diagnostics=diagnostics
     authority=Authority(state/'identity.key','http://127.0.0.1:19000')
-    runtime=ServerRuntime('/usr/local/bin/frps','/data/frps.json',store,access,diagnostics=diagnostics)
+    runtime=ServerRuntime('/usr/local/bin/frps',setup.directory/'frps.json',store,access,diagnostics=diagnostics)
     reload_event=asyncio.Event()
     setup.has_clients=lambda:bool(store.list_clients())
     setup.journal=journal
     setup.on_saved=reload_event.set
     migration=DomainMigration(store,setup,access)
-    async def restore(blob,password):
-        if store.list_clients(): raise ValueError('Restore requires an empty server')
-        await access.quiesce()
-        await telemetry.close()
-        await mqtt.close()
-        await runtime.stop()
-        try: restore_state(blob,password,state,options['base_domain'],options['tunnel_host'],options.get('reserved_names',[]))
-        except Exception:
-            await runtime.restart()
-            relay.closing=False
-            await relay.start()
-            await telemetry.start()
-            await mqtt.start()
-            raise
-        reload_event.set()
+    async def restore(blob,password,*,expected_revision):
+        async with store.administration.exclusive('restore'):
+            if availability is None or not availability.recovered: raise ConflictError('Wait for service startup')
+            require_empty_destination(store)
+            if restore_revision(store,setup.options)!=expected_revision: raise ValueError('Restore preview is stale')
+            try:
+                await notifications.close()
+                await access.quiesce()
+                await telemetry.close()
+                await mqtt.close()
+                await runtime.stop()
+                restore_state(blob,password,state,options['base_domain'],options['tunnel_host'],options.get('reserved_names',[]),
+                    current=store,expected_revision=expected_revision,configuration=setup.options)
+            except Exception:
+                await runtime.restart()
+                relay.closing=False
+                await relay.start()
+                await telemetry.start()
+                await mqtt.start()
+                await notifications.start()
+                raise
+            store.migrating=True  # Keep new commands closed until the replacement state reloads.
+            try: notifications.state.reset_namespace()
+            except Exception:
+                # Optional local delivery can never invalidate a completed restore.
+                notifications.diagnostic='storage_error'
+            reload_event.set()
     runners=[]
-    nginx=None
+    nginx=Gateway(setup.directory/'nginx.conf',diagnostics)
+    npm=NpmRuntime(setup.npm_dependency,options,store,nginx,diagnostics)
+    options['npm_runtime']=npm
+    setup.dependency_status=npm.status
+    progress={key:time.monotonic() for key in ('clock','watch','deadlines')}
     tasks=[]
-    output_tasks=[]
     failed=False
     availability=None
     try:
@@ -177,67 +204,71 @@ async def run_operational(options,addresses,setup):
         runners.append(await listen(plugin,'127.0.0.1',19000))
         runners.append(await listen(public,'0.0.0.0',19001))
         async def admin(user): return await verified_admin(user,os.environ.get('SUPERVISOR_TOKEN'))
-        runners.append(await listen(make_ingress_app(store,authority,options,runtime.revoke_and_disconnect,
+        runners.append(await listen(make_ingress_app(store,authority,options,relay.disconnect,
             lambda password:export_state(state,store,password),restore,access=access,telemetry=telemetry,
-            mqtt=mqtt,setup=setup,journal=journal,admin_check=admin,diagnostics=diagnostics,migration=migration),'0.0.0.0',8099))
+            mqtt=mqtt,setup=setup,journal=journal,admin_check=admin,diagnostics=diagnostics,migration=migration,notifications=notifications),'0.0.0.0',8099))
         phase('start_frp','frp')
         await runtime.start(server_config(pki))
         phase('start_telemetry','telemetry')
         await telemetry.start()
         await mqtt.start()
+        await notifications.start()
         if diagnostics:
             for component,task in (('mqtt',mqtt.task),('telemetry',telemetry.task),('relay',relay.flusher)):
                 if task is not None: diagnostics.observe(task,component)
-        phase('start_gateway','gateway')
-        atomic_write('/data/nginx.conf',nginx_config(options['trusted_proxy_ips']).encode())
-        sink=asyncio.subprocess.PIPE if diagnostics else asyncio.subprocess.DEVNULL
-        nginx=await asyncio.create_subprocess_exec('nginx','-c','/data/nginx.conf','-g','daemon off;',
-            stdout=sink,stderr=sink,env=child_environment())
-        if diagnostics:
-            diagnostics.component('gateway','running')
-            for stream in (nginx.stdout,nginx.stderr):
-                output_tasks.append(asyncio.create_task(ProcessOutput(diagnostics,'gateway').drain(stream)))
-        availability=AvailabilityService(store,clock,probe=ServiceProbe(runtime,nginx,options['server_url'],options['trusted_proxy_ips'],diagnostics))
+        # Ingress and the financial clock remain supervised during dependency waits.
+        availability=AvailabilityService(store,clock,probe=ServiceProbe(runtime,nginx,options['server_url'],lambda:npm.addresses,diagnostics,generation=lambda:npm.epoch))
+        npm.local_health=lambda:availability.healthy if availability.recovered else None
         store.billing_available=lambda:availability.healthy and not store.migrating
         await availability.recover()
         await access.expire_once()
-        async def gateway_wait():
-            result=await nginx.wait()
-            if diagnostics:
-                diagnostics.component('gateway','stopped',exit_code=result)
-                diagnostics.event('process_exit',component='gateway',level='ERROR',fields={'exit_code':result})
-            raise RuntimeError('Gateway process stopped')
         async def watch():
             delay=2
             next_renewal=0
             while True:
+                if store.administration.busy or store.migrating:
+                    progress['watch']=time.monotonic()
+                    await asyncio.sleep(1)
+                    continue
                 for component,task in (('mqtt',mqtt.task),('telemetry',telemetry.task),('relay',relay.flusher)):
                     if task is not None and task.done() and not task.cancelled():
                         task.result()
                         raise RuntimeError('Background service stopped')
                 if not runtime.status()['running']:
                     await asyncio.sleep(delay)
-                    await runtime.restart()
+                    if store.administration.busy or store.migrating: continue
+                    try: await runtime.restart()
+                    except ConflictError: continue
                     delay=min(120,delay*2)
                 else: delay=2
                 if time.monotonic()>=next_renewal:
                     renewed=ensure_pki(state/'pki',options['tunnel_host'])
-                    if renewed.renewed: await runtime.restart()
+                    if renewed.renewed:
+                        try: await runtime.restart()
+                        except ConflictError: continue
                     next_renewal=time.monotonic()+86400
-                atomic_write(HEALTH_PATH,str(int(time.time())).encode())
+                progress['watch']=time.monotonic()
                 await asyncio.sleep(5)
         async def deadlines():
             while True:
-                await availability.sample()
+                if availability.recovered: await availability.sample()
+                else: await availability.recover()
                 await access.expire_once()
-                store.set_metadata('clock_anchor',clock.checkpoint())
+                if not store.administration.busy and not store.migrating and clock.reliable:
+                    store.set_metadata('clock_anchor',clock.checkpoint())
+                progress['deadlines']=time.monotonic()
                 await asyncio.sleep(1)
+        async def heartbeat():
+            while True:
+                write_heartbeat(HEALTH_PATH,[*progress.values(),npm.progress])
+                await asyncio.sleep(5)
         phase('operational')
         if diagnostics:
             diagnostics.event('running',component='server',fields={'version':SERVER_VERSION})
             diagnostics.component('server','running')
-        tasks=[asyncio.create_task(watch(),name='runtime-watch'),asyncio.create_task(deadlines(),name='deadlines'),
-            asyncio.create_task(gateway_wait(),name='gateway-wait'),
+        tasks=[asyncio.create_task(clock_monitor.run(lambda:progress.update(clock=time.monotonic())),name='clock-monitor'),asyncio.create_task(watch(),name='runtime-watch'),asyncio.create_task(deadlines(),name='deadlines'),
+            asyncio.create_task(npm.run(),name='npm-dependency'),asyncio.create_task(npm.guard(),name='npm-expiry'),
+            asyncio.create_task(heartbeat(),name='liveness'),
             asyncio.create_task(shutdown_event(),name='shutdown'),asyncio.create_task(reload_event.wait(),name='reload')]
         done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
         for task in done: task.result()
@@ -256,21 +287,17 @@ async def run_operational(options,addresses,setup):
                 if diagnostics: diagnostics.failure('cleanup_error',error,component=component)
         for task in tasks: task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
+        await cleanup('notifications',notifications.close())
         if availability is not None: await cleanup('storage',availability.shutdown())
-        if nginx is not None and nginx.returncode is None:
-            async def stop_gateway():
-                nginx.terminate()
-                try: await asyncio.wait_for(nginx.wait(),10)
-                except TimeoutError: nginx.kill(); await nginx.wait()
-            await cleanup('gateway',stop_gateway())
-        for task in output_tasks: task.cancel()
-        await asyncio.gather(*output_tasks,return_exceptions=True)
+        npm.revoke()
+        await cleanup('gateway',nginx.close())
         await cleanup('frp',runtime.stop())
         await cleanup('telemetry',telemetry.close())
         await cleanup('mqtt',mqtt.close())
         await cleanup('relay',relay.close())
         try:
-            store.set_metadata('clock_anchor',clock.checkpoint())
+            if not store.administration.busy and not store.migrating and clock.reliable:
+                store.set_metadata('clock_anchor',clock.checkpoint())
             journal.shutdown(clock.now())
         except Exception as error:
             errors.append(error)

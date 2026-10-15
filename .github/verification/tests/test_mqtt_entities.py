@@ -50,7 +50,9 @@ async def test_birth_and_new_clients_republish_discovery():
     records=[]
     clients=[client()]
     async def provider(): return None
-    class Info: rc=0
+    class Info:
+        rc=0
+        def is_published(self): return True
     class Broker:
         def publish(self,topic,payload,**kwargs): records.append((topic,payload,kwargs)); return Info()
     bridge=MqttBridge('a'*32,'server',provider,lambda:clients)

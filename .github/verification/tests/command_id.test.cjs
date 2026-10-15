@@ -15,3 +15,18 @@ const helperIndex=html.indexOf('<script src="command_id.js" defer></script>'),ap
 assert.ok(helperIndex>=0 && appIndex>=0,'Both script tags must be present');
 assert.ok(helperIndex<appIndex,'Command helper must load before the application');
 console.log('PASS: actual access command works without randomUUID; CSPRNG UUID version/variant and fresh bytes verified');
+(async()=>{
+  const holder={};const sent=[];
+  context.holder=holder;
+  context.send=async payload=>{sent.push({...payload});throw Error('lost response');};
+  await assert.rejects(vm.runInContext("administrativeCommand(holder,'reissue',{revision:7},send)",context));
+  context.send=async payload=>{sent.push({...payload});return 'same result';};
+  assert.equal(await vm.runInContext("administrativeCommand(holder,'reissue',{revision:8},send)",context),'same result');
+  assert.equal(sent[0].revision,7);assert.deepEqual(sent[0],sent[1]);
+  context.send=async payload=>{sent.push({...payload});const error=Error('stale');error.status=409;throw error;};
+  await assert.rejects(vm.runInContext("administrativeCommand(holder,'reissue',{revision:8},send)",context));
+  context.send=async payload=>{sent.push({...payload});return 'new result';};
+  await vm.runInContext("administrativeCommand(holder,'reissue',{revision:9},send)",context);
+  assert.equal(sent[3].revision,9);assert.notEqual(sent[2].command_id,sent[3].command_id);
+  console.log('PASS: uncertain administrative retry retains revision and command id; confirmed conflict resets it');
+})().catch(error=>{console.error(error);process.exitCode=1;});

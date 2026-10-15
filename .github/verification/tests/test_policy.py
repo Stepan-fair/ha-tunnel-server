@@ -21,16 +21,20 @@ def setup(tmp_path):
 def test_identity_bound_on_login_and_work_connections(setup):
     store, authority, authorize, a, b = setup
     jwt = authority.issue(a.client_id)
-    assert authorize('Login', {'user':a.client_id,'privilege_key':jwt}, store, authority)['reject'] is False
+    login=authorize('Login', {'user':a.client_id,'privilege_key':jwt}, store, authority)
+    assert login['reject'] is False
+    user={k:login['content'][k] for k in ('user','run_id','metas')}
     assert authorize('Login', {'user':b.client_id,'privilege_key':jwt}, store, authority)['reject'] is True
     for op in ['Ping', 'NewWorkConn']:
         assert authorize(op, {'user':{'user':b.client_id},'privilege_key':jwt}, store, authority)['reject'] is True
-        assert authorize(op, {'user':{'user':a.client_id},'privilege_key':jwt}, store, authority)['reject'] is False
+        assert authorize(op, {'user':user,'run_id':user['run_id'],'privilege_key':jwt}, store, authority)['reject'] is False
 
 
 def test_allowed_proxy_and_revocation(setup):
     store, authority, authorize, a, b = setup
-    content = {'user':{'user':a.client_id}, 'proxy_type':'http',
+    login=authorize('Login',{'user':a.client_id,'privilege_key':authority.issue(a.client_id)},store,authority)
+    user={k:login['content'][k] for k in ('user','run_id','metas')}
+    content = {'user':user, 'proxy_type':'http',
                'proxy_name':a.client_id+'.ha', 'custom_domains':[a.domain]}
     assert not authorize('NewProxy',content,store,authority)['reject']
     store.revoke(a.client_id)
@@ -40,7 +44,9 @@ def test_allowed_proxy_and_revocation(setup):
 
 def test_bandwidth_limit_controlled_only_by_server(setup):
     store,authority,authorize,a,b=setup
-    content={'user':{'user':a.client_id},'proxy_type':'http',
+    login=authorize('Login',{'user':a.client_id,'privilege_key':authority.issue(a.client_id)},store,authority)
+    user={k:login['content'][k] for k in ('user','run_id','metas')}
+    content={'user':user,'proxy_type':'http',
              'proxy_name':a.client_id+'.ha','custom_domains':[a.domain],
              'bandwidth_limit':'999MB','bandwidth_limit_mode':'client'}
     result=authorize('NewProxy',content,store,authority,bandwidth_limit_mb=3)
@@ -61,7 +67,9 @@ def test_bandwidth_limit_controlled_only_by_server(setup):
 ])
 def test_rejects_proxy_escalations(setup, override):
     store, authority, authorize, a, b = setup
-    content = {'user':{'user':a.client_id},'proxy_type':'http',
+    login=authorize('Login',{'user':a.client_id,'privilege_key':authority.issue(a.client_id)},store,authority)
+    user={k:login['content'][k] for k in ('user','run_id','metas')}
+    content = {'user':user,'proxy_type':'http',
                'proxy_name':a.client_id+'.ha','custom_domains':[a.domain],**override}
     assert authorize('NewProxy',content,store,authority)['reject']
 
