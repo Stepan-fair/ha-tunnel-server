@@ -8,6 +8,104 @@ from server.app.npm_dependency import NpmDependency
 from shared.supervisor_client import SupervisorClient
 
 
+async def test_same_key_callers_share_one_actual_child_without_caching(monkeypatch, tmp_path):
+    from shared import dns
+    worker = tmp_path/'shared.py'
+    worker.write_text('import time\ntime.sleep(.15)\nprint(\'[[2,1,6,"",["127.0.0.1",443]]]\')\n')
+    monkeypatch.setattr(dns, '_worker', str(worker))
+    children = []
+    original = asyncio.create_subprocess_exec
+    async def spawn(*args, **kwargs):
+        child = await original(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    tasks = [asyncio.create_task(dns.getaddrinfo('shared.invalid', 443)) for _ in range(6)]
+    rows = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(isinstance(row, list) and row[0][4][0] == '127.0.0.1' for row in rows), rows
+    assert len(children) == 1 and children[0].returncode == 0
+    await dns.getaddrinfo('shared.invalid', 443)
+    assert len(children) == 2, 'completed lookups are never cached'
+
+
+async def test_shared_waiters_are_bounded_cancel_independently_and_keep_original_deadline(monkeypatch, tmp_path):
+    from shared import dns
+    worker = tmp_path/'blocked.py'
+    worker.write_text('import time\ntime.sleep(60)\n')
+    monkeypatch.setattr(dns, '_worker', str(worker))
+    monkeypatch.setattr(dns, '_DEADLINE', .5)
+    children = []
+    original = asyncio.create_subprocess_exec
+    async def spawn(*args, **kwargs):
+        child = await original(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    start = asyncio.get_running_loop().time()
+    tasks = [asyncio.create_task(dns.getaddrinfo('same.invalid', 443)) for _ in range(16)]
+    try:
+        async with asyncio.timeout(2):
+            while not children: await asyncio.sleep(.005)
+        assert dns._waiters == 16 and len(children) == 1
+        with pytest.raises(OSError, match='busy'): await dns.getaddrinfo('same.invalid', 443)
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError): await tasks[0]
+        assert dns._waiters == 15 and children[0].returncode is None
+        await asyncio.sleep(.15)
+        late = asyncio.create_task(dns.getaddrinfo('same.invalid', 443))
+        tasks.append(late)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(isinstance(result, OSError) for result in results[1:])
+        assert asyncio.get_running_loop().time()-start < .9
+        assert len(children) == 1 and children[0].returncode is not None
+        assert dns._waiters == 0 and not dns._active
+    finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_global_waiter_limit_and_exact_host_port_family_keys(monkeypatch, tmp_path):
+    from shared import dns
+    worker = tmp_path/'blocked.py'
+    worker.write_text('import time\ntime.sleep(60)\n')
+    monkeypatch.setattr(dns, '_worker', str(worker))
+    monkeypatch.setattr(dns, '_DEADLINE', .5)
+    keys = [('supervisor', 80, 0), ('supervisor.', 80, 0),
+            ('supervisor', 81, 0), ('supervisor', 80, socket.AF_INET)]
+    tasks = [asyncio.create_task(dns.getaddrinfo(*key)) for key in keys for _ in range(16)]
+    try:
+        await asyncio.sleep(.05)
+        assert dns._waiters == 64 and set(dns._active) == set(keys)
+        with pytest.raises(OSError, match='busy'): await dns.getaddrinfo('other.invalid', 80)
+        with pytest.raises(OSError, match='busy'): await dns.getaddrinfo(*keys[0])
+        # Another event loop cannot attach to a task owned by this loop, even
+        # after a waiter slot is freed. It also must not spawn a replacement.
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError): await tasks[0]
+        def other_loop():
+            async def lookup():
+                with pytest.raises(OSError, match='busy'): await dns.getaddrinfo(*keys[0])
+            asyncio.run(lookup())
+        await asyncio.to_thread(other_loop)
+        assert len(dns._active) == 4
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(isinstance(result, OSError) for result in results[1:])
+        assert dns._waiters == 0 and not dns._active
+    finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_scoped_host_case_is_not_coalesced(monkeypatch, tmp_path):
+    from shared import dns
+    worker = tmp_path/'answers.py'
+    worker.write_text('import json,sys,time\ntime.sleep(.1)\nhost,port,family=json.loads(sys.argv[1])\n'
+                      'print(json.dumps([[2,1,6,"",["127.0.0."+("1" if host.endswith("ETH0") else "2"),port]]]))\n')
+    monkeypatch.setattr(dns, '_worker', str(worker))
+    results = await asyncio.gather(dns.getaddrinfo('fe80::1%ETH0', 80), dns.getaddrinfo('fe80::1%eth0', 80))
+    assert [rows[0][4][0] for rows in results] == ['127.0.0.1', '127.0.0.2']
+
+
 def test_actual_children_are_reaped_when_event_loops_are_recreated(monkeypatch,tmp_path):
     from shared import dns
     worker=tmp_path/'loop_dns.py'; worker.write_text('import time\ntime.sleep(60)\n')
@@ -75,12 +173,15 @@ async def test_recreated_owners_bound_underlying_dns_and_recover(monkeypatch, tm
             await asyncio.sleep(.005)
         first.cancel()
         with pytest.raises(asyncio.CancelledError): await first
-        for _ in range(80):
+        async def retry():
             try:
                 async with asyncio.timeout(.005):
                     await attempt()
             except (TimeoutError, ValueError, OSError):
                 pass
+        # A burst within one lookup lifetime, not serial waits spanning multiple
+        # expired jobs (fresh work after actual reaping is intentionally allowed).
+        await asyncio.gather(*(retry() for _ in range(80)))
         assert len(children) == 1, 'one owned DNS child must survive owner recreation'
         assert await asyncio.wait_for(asyncio.to_thread(lambda: 'progress'), .5) == 'progress'
         await asyncio.wait_for(children[0].wait(), 2)

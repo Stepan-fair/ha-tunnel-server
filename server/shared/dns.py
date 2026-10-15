@@ -1,8 +1,8 @@
 """Finite process-lifetime DNS work, independent of HTTP-session lifetimes.
 
-No queue or result cache: an occupied key fails closed, including after its
-caller timed out. The owned child is killed and reaped on deadline; a later
-attempt starts a fresh lookup. Slots remain quarantined until reaping succeeds.
+No queue or result cache: concurrent callers on one event loop share an active
+lookup within finite waiter budgets. The original child deadline never moves.
+Slots remain quarantined until reaping succeeds; completed results aren't reused.
 """
 import asyncio
 import ipaddress
@@ -18,12 +18,23 @@ from aiohttp.abc import AbstractResolver
 from shared.environment import child_environment
 
 _LIMIT = 8
+_WAITERS_PER_JOB = 16
+_WAITERS_TOTAL = 64
+_waiters = 0
 _DEADLINE = 4.0
 _REAP_DEADLINE = 1.0
 _active = {}
 _lock = threading.Lock()
 _tasks = set()
 _worker = str(Path(__file__).with_name('dns_worker.py'))
+
+
+class _Lookup:
+    def __init__(self, loop):
+        self.loop = loop
+        self.job = None
+        self.waiters = 0
+        self.accepting = True
 
 
 def _owned(coroutine):
@@ -100,6 +111,8 @@ async def _job(host, port, family, key, token):
     except (TimeoutError, ValueError, TypeError, KeyError, UnicodeError):
         raise OSError('DNS unavailable') from None
     finally:
+        with _lock:
+            token.accepting = False
         if process is not None:
             await _reap(process, key, token)
         else:
@@ -109,21 +122,39 @@ async def _job(host, port, family, key, token):
 
 
 async def getaddrinfo(host, port, family=socket.AF_UNSPEC):
+    global _waiters
     if not isinstance(host, str) or not 1 <= len(host) <= 253 or '\x00' in host:
         raise OSError('Invalid DNS target')
     if port is not None and (type(port) is not int or not 0 <= port <= 65535):
         raise OSError('Invalid DNS port')
     if family not in (socket.AF_UNSPEC, socket.AF_INET, socket.AF_INET6):
         raise OSError('Invalid DNS family')
-    key = (host.lower().rstrip('.'), port, family)
-    token = object()
+    # Search-domain and scoped-address semantics depend on the exact input.
+    key = (host, port, family)
+    loop = asyncio.get_running_loop()
     with _lock:
-        if key in _active or len(_active) >= _LIMIT:
+        token = _active.get(key)
+        if _waiters >= _WAITERS_TOTAL:
             raise OSError('DNS lookup busy')
-        _active[key] = token
-    job = _owned(_job(host, port, family, key, token))
+        if token is not None:
+            if (token.loop is not loop or not token.accepting or token.job.done()
+                    or token.waiters >= _WAITERS_PER_JOB):
+                raise OSError('DNS lookup busy')
+        else:
+            if len(_active) >= _LIMIT:
+                raise OSError('DNS lookup busy')
+            token = _Lookup(loop)
+            _active[key] = token
+            token.job = _owned(_job(host, port, family, key, token))
+        token.waiters += 1
+        _waiters += 1
     # A caller cancellation cannot detach ownership of the underlying child.
-    return await asyncio.shield(job)
+    try:
+        return list(await asyncio.shield(token.job))
+    finally:
+        with _lock:
+            token.waiters -= 1
+            _waiters -= 1
 
 
 class Resolver(AbstractResolver):
