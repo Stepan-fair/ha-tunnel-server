@@ -1,3 +1,4 @@
+import asyncio
 import time
 from aiohttp import encode_basic_auth
 from aiohttp.test_utils import TestClient, TestServer
@@ -5,6 +6,67 @@ from server.app.store import Store
 from server.app.identity import Authority
 from server.app.policy import authorize
 from server.app.web import make_public_app
+
+
+async def test_status_busy_npm_refresh_is_temporary_and_preserves_binding(tmp_path):
+    from server.app.npm_dependency import NpmRuntime, VerifiedNpmSnapshot, NPM_HOST
+
+    class Dependency:
+        hold = False
+        def __init__(self):
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+        async def snapshot(self, options):
+            assert options['npm_host'] == NPM_HOST
+            if self.hold:
+                self.entered.set()
+                await self.release.wait()
+            # Synthetic proxy for local HTTP only; production address validation stays intact.
+            return VerifiedNpmSnapshot(NPM_HOST, ('127.0.0.1',), time.monotonic())
+
+    class Gateway:
+        running = False
+        def revoke(self): self.running = False
+        async def start(self, snapshot): self.running = True
+
+    store = Store(tmp_path/'state.db', 'example.org', clock=lambda: 2000)
+    credentials = store.redeem(store.issue('alpha', 2000).code, 2000)
+    invitation = store.issue('beta', 2000)
+    dependency = Dependency()
+    runtime = NpmRuntime(dependency, {'npm_host': NPM_HOST}, store, Gateway())
+    assert await runtime.refresh()
+    headers = {'X-Forwarded-Proto': 'https',
+               'Authorization': encode_basic_auth(credentials.client_id, credentials.secret)}
+    body = {'capabilities': ['access-v1', 'telemetry-v1']}
+    async with TestClient(TestServer(make_public_app(store, None, {'npm_runtime': runtime}))) as http:
+        assert (await http.post('/v1/client/status', headers=headers, json=body)).status == 200
+        before = store.access_snapshot(credentials.client_id, 2000)
+        database = store.path.read_bytes()
+        dependency.hold = True
+        pending = asyncio.create_task(runtime.refresh())
+        try:
+            await asyncio.wait_for(dependency.entered.wait(), 2)
+            assert store.administration.owner is pending
+            assert store.administration.operation == 'npm_dependency'
+            assert runtime.addresses == ('127.0.0.1',)
+            response = await http.post('/v1/client/status', headers=headers, json=body)
+            assert response.status == 503
+            assert response.headers['Cache-Control'] == 'no-store'
+            assert response.headers['Strict-Transport-Security'] == 'max-age=31536000'
+            assert store.path.read_bytes() == database
+            assert store.access_snapshot(credentials.client_id, 2000) == before
+            assert store.status_authenticate(credentials.client_id, credentials.secret) is not None
+            assert (await http.post('/v1/client/status', headers={'X-Forwarded-Proto': 'https'}, json=body)).status == 401
+            assert (await http.post('/v1/enroll', headers=headers, json={'code': invitation.code})).status == 409
+        finally:
+            dependency.release.set()
+            assert await asyncio.wait_for(pending, 2)
+        assert not store.administration.busy
+        assert (await http.post('/v1/client/status', headers=headers, json=body)).status == 200
+        assert (await http.post('/v1/client/status', headers={'X-Forwarded-Proto': 'https'}, json=body)).status == 401
+        assert (await http.post('/v1/client/status', headers=headers, data='{')).status == 400
+        for malformed in ({}, {**body, 'extra': True}, {'capabilities': 'access-v1'},
+                          {'capabilities': ['enrollment-v2']}, {'capabilities': ['access-v1']*3}, []):
+            assert (await http.post('/v1/client/status', headers=headers, json=malformed)).status == 400
 
 
 async def test_paused_status_allowed_token_denied(tmp_path):

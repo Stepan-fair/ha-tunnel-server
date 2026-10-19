@@ -74,6 +74,52 @@ async def test_old_server_fallback():
         finally: await service.close()
 
 
+async def test_temporary_http_503_keeps_active_binding_and_later_refreshes(tmp_path, monkeypatch):
+    from aiohttp import web, encode_basic_auth
+    from aiohttp.test_utils import TestServer
+    from unittest.mock import AsyncMock
+    from client.app.status import ClientStatusClient
+    from client.app.enrollment import load_credentials
+    from tests.test_client_recovery import controller
+    import client.app.controller as module
+
+    ctrl, credentials = controller(tmp_path)
+    ctrl.state = 'connected'
+    ctrl.runtime.status = lambda: {'running': True}
+    monkeypatch.setattr(module, 'verify_tunnel_tls', AsyncMock())
+    monkeypatch.setattr(module, 'proxy_running', AsyncMock(return_value=True))
+    revision = 1
+    unavailable = False
+    app = web.Application()
+    async def status(request):
+        assert request.headers['Authorization'] == encode_basic_auth(credentials['client_id'], credentials['secret'])
+        assert await request.json() == {'capabilities': ['access-v1', 'telemetry-v1']}
+        if unavailable: raise web.HTTPServiceUnavailable()
+        return web.json_response({'client_id': credentials['client_id'], 'access_state': 'allowed',
+                                  'revision': revision, 'generation': 0})
+    app.router.add_post('/v1/client/status', status)
+    async with TestServer(app) as server:
+        ctrl.status_client = ClientStatusClient(credentials['server_url'])
+        ctrl.status_client.server_url = str(server.make_url('')).rstrip('/')
+        ctrl.status_origin = credentials['server_url']
+        try:
+            await ctrl.monitor_once()
+            assert ctrl.state == 'connected' and ctrl.server_access['revision'] == 1
+            unavailable = True
+            await ctrl.monitor_once()
+            assert ctrl.state == 'offline' and ctrl.billing_stale
+            assert ctrl.runtime.status()['running'] and ctrl.runtime.stopped == 0
+            assert ctrl.credentials == credentials and load_credentials(ctrl.directory) == credentials
+            assert ctrl.server_access['revision'] == 1
+            unavailable, revision = False, 2
+            await ctrl.monitor_once()
+            assert ctrl.state == 'connected' and not ctrl.billing_stale
+            assert ctrl.server_access['revision'] == 2
+            assert ctrl.runtime.stopped == 0 and load_credentials(ctrl.directory) == credentials
+        finally:
+            await ctrl.close()
+
+
 async def test_043_health_first_status_contract_with_current_server(tmp_path):
     """Exact 0.4.3 request order/body, without importing an old runtime."""
     from aiohttp import encode_basic_auth
