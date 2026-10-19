@@ -13,9 +13,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13.16'
       - name: Install locked verifier dependencies
         run: |
-          python3 -m venv "$RUNNER_TEMP/route-verifier"
+          python -m venv "$RUNNER_TEMP/route-verifier"
           "$RUNNER_TEMP/route-verifier/bin/python" -m pip install --require-hashes -r .github/verification/requirements.lock
       - name: Check HTTPS shell and anonymous WebSocket greeting
         working-directory: .github/verification

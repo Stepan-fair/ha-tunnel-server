@@ -168,7 +168,10 @@ def make_public_app(store, authority, options, access=None, telemetry=None):
         if not authenticated_limits.allow(('status',client.client_id),60): raise web.HTTPTooManyRequests()
         data=await request.json()
         if not isinstance(data,dict) or set(data)!={'capabilities'}: raise ValueError()
-        store.set_capabilities(client.client_id,data['capabilities'])
+        try:
+            store.set_capabilities(client.client_id,data['capabilities'])
+        except ConflictError:
+            raise web.HTTPServiceUnavailable() from None
         result=store.access_snapshot(client.client_id,store.now())
         result['server_instance_id']=store.get_metadata('instance_id')
         result['billing']['updated_at']=store.now()

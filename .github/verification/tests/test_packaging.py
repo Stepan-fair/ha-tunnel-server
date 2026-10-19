@@ -148,6 +148,27 @@ def test_generated_acceptance_and_baseline_do_not_enter_production_context(tmp_p
         assert (output/'docs'/name).read_bytes()==(Path('docs')/name).read_bytes()
 
 
+@pytest.mark.parametrize('role', ['server', 'client'])
+def test_external_acceptance_selects_production_python_before_locked_install(tmp_path, role):
+    from tools.release_repository import release_repository
+    output = tmp_path/'release'
+    release_repository(role, output)
+    workflow = YAML(typ='safe').load((output/'.github/workflows/external_acceptance.yml').read_text())
+    steps = workflow['jobs']['check']['steps']
+    setup = next((step for step in steps if step.get('uses', '').startswith('actions/setup-python@')), None)
+    assert setup is not None, 'External verifier must not inherit the runner Python'
+    assert setup['uses'] == 'actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1'
+    assert setup['with']['python-version'] == '3.13.16'
+    install = next(step for step in steps if ' -m venv ' in step.get('run', ''))
+    assert steps.index(setup) < steps.index(install)
+    assert install['run'].splitlines()[0] == 'python -m venv "$RUNNER_TEMP/route-verifier"'
+    assert ' -m pip install --require-hashes -r .github/verification/requirements.lock' in install['run']
+    assert (output/'.github/verification/requirements.lock').read_bytes() == Path('requirements.lock').read_bytes()
+    check = steps[-1]
+    assert check['working-directory'] == '.github/verification'
+    assert check['run'] == '"$RUNNER_TEMP/route-verifier/bin/python" -m tools.external_acceptance'
+
+
 def test_release_runs_real_linux_tests_before_publication(tmp_path):
     from tools.release_repository import release_repository
     output=tmp_path/'release'
