@@ -34,5 +34,11 @@ done < /out/module-notices.txt
 go version -m /out/frps > /out/frps-build.txt
 go version -m /out/frpc > /out/frpc-build.txt
 # Check compiled symbols, rather than treating unused module packages as live.
-go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frps > /out/frps-vulncheck.txt
-go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frpc > /out/frpc-vulncheck.txt
+if ! go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frps > /out/frps-vulncheck.txt; then
+    cat /out/frps-vulncheck.txt >&2
+    exit 1
+fi
+if ! go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frpc > /out/frpc-vulncheck.txt; then
+    cat /out/frpc-vulncheck.txt >&2
+    exit 1
+fi
