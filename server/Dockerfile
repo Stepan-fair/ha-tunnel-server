@@ -3,7 +3,7 @@ COPY tools/build_frp.sh /build-frp.sh
 RUN sh /build-frp.sh
 FROM python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends nginx ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends nginx ca-certificates && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' nginx)" ge 1.26.3-3+deb13u10 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.lock
