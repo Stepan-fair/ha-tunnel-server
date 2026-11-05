@@ -8,7 +8,7 @@ printf '%s\n' '6ae290e8aec2ef389b8e12772481e361f330631d070e78d2919295124acbc2c8 
 mkdir -p /src /out
 tar xzf /tmp/frp-source.tar.gz --strip-components=1 -C /src
 cd /src
-go mod edit -require=github.com/Azure/go-ntlmssp@v0.1.1 -require=golang.org/x/crypto@v0.56.0
+go mod edit -require=github.com/Azure/go-ntlmssp@v0.1.1 -require=golang.org/x/crypto@v0.56.0 -require=github.com/go-jose/go-jose/v4@v4.1.7
 go mod tidy
 # Retain symbols: stripped binaries make govulncheck fall back to whole modules.
 go build -p 1 -mod=readonly -trimpath -tags=frps,noweb -o /out/frps ./cmd/frps
