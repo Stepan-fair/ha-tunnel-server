@@ -8,7 +8,7 @@ printf '%s\n' '6ae290e8aec2ef389b8e12772481e361f330631d070e78d2919295124acbc2c8 
 mkdir -p /src /out
 tar xzf /tmp/frp-source.tar.gz --strip-components=1 -C /src
 cd /src
-go mod edit -require=github.com/Azure/go-ntlmssp@v0.1.1 -require=golang.org/x/crypto@v0.56.0
+go mod edit -require=github.com/Azure/go-ntlmssp@v0.1.1 -require=golang.org/x/crypto@v0.56.0 -require=github.com/go-jose/go-jose/v4@v4.1.7
 go mod tidy
 # Retain symbols: stripped binaries make govulncheck fall back to whole modules.
 go build -p 1 -mod=readonly -trimpath -tags=frps,noweb -o /out/frps ./cmd/frps
@@ -34,5 +34,11 @@ done < /out/module-notices.txt
 go version -m /out/frps > /out/frps-build.txt
 go version -m /out/frpc > /out/frpc-build.txt
 # Check compiled symbols, rather than treating unused module packages as live.
-go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frps > /out/frps-vulncheck.txt
-go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frpc > /out/frpc-vulncheck.txt
+if ! go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frps > /out/frps-vulncheck.txt; then
+    cat /out/frps-vulncheck.txt >&2
+    exit 1
+fi
+if ! go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=binary /out/frpc > /out/frpc-vulncheck.txt; then
+    cat /out/frpc-vulncheck.txt >&2
+    exit 1
+fi

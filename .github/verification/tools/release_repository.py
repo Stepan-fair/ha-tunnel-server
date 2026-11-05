@@ -18,6 +18,8 @@ def release_repository(component,output):
     text=(ROOT/'tools/release_templates/build.yml').read_text(encoding='utf-8')
     target.write_text(text.replace('__ROLE__',component),encoding='utf-8')
     (target.parent/'external_acceptance.yml').write_bytes((ROOT/'tools/release_templates/external_acceptance.yml').read_bytes())
+    scan=(ROOT/'tools/release_templates/published-image-scan.yml').read_text(encoding='utf-8')
+    (target.parent/'published-image-scan.yml').write_text(scan.replace('__ROLE__',component),encoding='utf-8')
     script=Path(output)/'.github/scripts/guard_image.py'
     script.parent.mkdir(parents=True,exist_ok=True)
     script.write_bytes((ROOT/'tools/release_templates/guard_image.py').read_bytes())

@@ -158,7 +158,7 @@ def test_external_acceptance_selects_production_python_before_locked_install(tmp
     setup = next((step for step in steps if step.get('uses', '').startswith('actions/setup-python@')), None)
     assert setup is not None, 'External verifier must not inherit the runner Python'
     assert setup['uses'] == 'actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1'
-    assert setup['with']['python-version'] == '3.13.16'
+    assert setup['with']['python-version'] == '3.13.18'
     install = next(step for step in steps if ' -m venv ' in step.get('run', ''))
     assert steps.index(setup) < steps.index(install)
     assert install['run'].splitlines()[0] == 'python -m venv "$RUNNER_TEMP/route-verifier"'
